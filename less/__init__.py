@@ -1,1 +1,1 @@
-from .less import LESS
+from .less import LESSRegressor
