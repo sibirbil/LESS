@@ -4,7 +4,7 @@ LESS is a new supervised learning algorithm that is based on training many local
 
 ## Installation
 
-`pip install git+https://github.com/sbirbil/LESS.git`
+`pip install git+https://github.com/sibirbil/LESS.git`
 
 ## Testing
 
