@@ -22,6 +22,12 @@ from sklearn.svm import SVR
 # %%
 
 def synthetic_sine_curve(n_samples=200):
+    '''
+    A simple function to generate n_samples from sine curve
+    in the range (-10, 10) with some amplitude. The function
+    returns the dataset (X, y), and plots the function (curve)
+    along with the dataset (circles).
+    '''
 
     sns.set_style('ticks')
     sns.color_palette('pastel')
@@ -50,7 +56,11 @@ def synthetic_sine_curve(n_samples=200):
 
 
 def compare_1D_plots(X, y):
-    
+    '''
+    Plots the fitted functions obtained with various
+    regressors (using their default values) on the
+    one-dimensional dataset (X, y).
+    '''
     _ , dim  = X.shape
     
     if (dim > 1):
@@ -131,6 +141,15 @@ def compare_1D_plots(X, y):
     plt.show()
 
 def less_bias_vs_variance(X, y):
+    '''
+    Plots the changes in the fitted function obtained
+    with LESS on the one-dimensional dataset
+    (X, y). The panel of plots is given for various 
+    values of:
+        number of subsets,
+        number of neighbors,
+        number of replications.
+    '''
     
     _ , dim = X.shape
     
@@ -171,7 +190,11 @@ def less_bias_vs_variance(X, y):
     plt.show()
     
 def timings(X, y):
-
+    '''
+    Returns a barplot of training times of
+    various regressors (using their default
+    values) on the one-dimensional dataset (X, y).
+    '''
 
     AllTimes = {}
     
