@@ -2,6 +2,8 @@
 
 LESS is a new supervised learning algorithm that is based on training many local estimators on subsets of a given dataset, and then passing their predictions to a global estimator.
 
+![LESS](./img/LESS1Level.png))
+
 ## Installation
 
 `pip install git+https://github.com/sibirbil/LESS.git`
