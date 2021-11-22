@@ -273,7 +273,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
             # Normalize the distances from each sample to the local subsets
             if (self.d_normalize_):
-                dists = (dists.T/np.sum(dists, axis=1)).T
+                dists = (dists.T/np.sum(dists, axis=1)+1.0e-6).T
             
             if (self.global_estimator_ != None):
                 if ('random_state' in self.global_estimator_().get_params().keys()):
@@ -340,7 +340,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
             # Normalize the distances from each sample to the local subsets
             if (self.d_normalize_):
-                dists = (dists.T/np.sum(dists, axis=1)).T
+                dists = (dists.T/np.sum(dists, axis=1)+1.0e-6).T
             
             if (self.global_estimator_ != None):
                 if ('random_state' in self.global_estimator_().get_params().keys()):
@@ -421,7 +421,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
             # Normalize the distances from each sample to the local subsets
             if (self.d_normalize_):
-                dists = (dists.T/np.sum(dists, axis=1)).T
+                dists = (dists.T/np.sum(dists, axis=1)+1.0e-6).T
             
             if (self.global_estimator_ != None):
                 if ('random_state' in self.global_estimator_().get_params().keys()):
@@ -501,7 +501,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
             # Normalize the distances from each sample to the local subsets
             if (self.d_normalize_):
-                dists = (dists.T/np.sum(dists, axis=1)).T
+                dists = (dists.T/np.sum(dists, axis=1)+1.0e-6).T
             
             if (self.global_estimator_ != None):
                 if ('random_state' in self.global_estimator_().get_params().keys()):
@@ -552,7 +552,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
             # Normalize the distances from each sample to the local subsets
             if (self.d_normalize_):
-                dists = (dists.T/np.sum(dists, axis=1)).T
+                dists = (dists.T/np.sum(dists, axis=1)+1.0e-6).T
 
             if (global_model != None):
                 yhat += global_model.predict(dists * predicts)
