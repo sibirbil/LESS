@@ -37,7 +37,7 @@ class ReplicationR(NamedTuple):
 
 
 ############################
-def rbf(data, center, coeff=1.0):
+def rbf(data, center, coeff=0.01):
     '''
     RBF kernel - L2 norm
     This is is used by the default distance function in LESS 
