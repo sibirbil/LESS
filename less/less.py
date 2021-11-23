@@ -88,8 +88,6 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         self.d_normalize = d_normalize
         self.val_size = val_size
         self.random_state = random_state
-
-        self._set_local_attributes()
     
     def _set_local_attributes(self):
         '''
@@ -199,6 +197,8 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         
         # Check that X and y have correct shape
         X, y = check_X_y(X, y)
+        
+        self._set_local_attributes()
         
         if (self.val_size != None):
             # Validation set is not used for
