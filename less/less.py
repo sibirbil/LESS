@@ -96,64 +96,51 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         Storing the local variables and
         checking the given parameters
         '''
-        
-  
-        self.local_estimator_ = self.local_estimator
-        self.global_estimator_ = self.global_estimator
-        self.tree_method_ = self.tree_method
-        self.cluster_method_ = self.cluster_method
-        self.distance_function_ = self.distance_function
-        self.frac_ = self.frac
-        self.n_neighbors_ = self.n_neighbors
-        self.n_subsets_ = self.n_subsets
-        self.n_replications_ = self.n_replications
-        self.d_normalize_ = self.d_normalize
-        self.val_size_ = self.val_size
-        self.random_state_ = self.random_state
-        self.rng_ = np.random.default_rng(self.random_state_)
-        self.replications_: Optional[List[ReplicationR]] = None
+
+        self._rng = np.random.default_rng(self.random_state)
+        self._replications: Optional[List[ReplicationR]] = None
         self._isfitted = False
         
-        if(self.local_estimator_ == None):
+        if(self.local_estimator == None):
             raise ValueError('LESS does not work without a local estimator.')
             
-        if (self.val_size_ != None):            
-            if(self.val_size_ <= 0.0 or self.val_size_ >= 1.0):
+        if (self.val_size != None):            
+            if(self.val_size <= 0.0 or self.val_size >= 1.0):
                 raise ValueError('Parameter val_size should be in the interval (0, 1).')
         
-        if(self.frac_ != None):
-            if(self.frac_ <= 0.0 or self.frac_ > 1.0):
+        if(self.frac != None):
+            if(self.frac <= 0.0 or self.frac > 1.0):
                 raise ValueError('Parameter frac should be in the interval (0, 1].')
 
-        if (self.n_replications_ < 1):
+        if (self.n_replications < 1):
             raise ValueError('The number of replications should greater than equal to one.')
                         
-        if (self.cluster_method_ != None):
-            if (self.frac_ != None):
+        if (self.cluster_method != None):
+            if (self.frac != None):
                 warnings.warn('Both frac and cluster_method parameters are provided. \
                               Proceeding with clustering...')
-                self.frac_ = None
+                self.frac = None
                 
-            if ('n_clusters' in self.cluster_method_().get_params().keys()):
-                if (self.cluster_method_().get_params()['n_clusters'] == 1):
+            if ('n_clusters' in self.cluster_method().get_params().keys()):
+                if (self.cluster_method().get_params()['n_clusters'] == 1):
                     warnings.warn('There is only one cluster, so the \
                                   global estimator is set to none.')
                     # If no global estimator is defined, then we output
                     # the average of the local estimators by assigning 
                     # the weight (1/self.n_subsets) to each local estimator
-                    self.global_estimator_ = None
-                    self.d_normalize_ = True
+                    self.global_estimator = None
+                    self.d_normalize = True
                     # If there is also no validation step, then there is 
                     # no randomness. So, no need for replications.
-                    if (self.val_size_ == None):
+                    if (self.val_size == None):
                         warnings.warn('Since validation set is not used, \
                             there is no randomness, and hence, \
                                 no need for replications.')                        
-                        self.n_replications_ = 1
-        elif(self.frac_ == None and 
-             self.n_neighbors_== None and
-             self.n_subsets_ == None):
-            self.frac_ = 0.05
+                        self.n_replications = 1
+        elif(self.frac == None and 
+             self.n_neighbors== None and
+             self.n_subsets == None):
+            self.frac = 0.05
                     
     def _check_input(self, len_X: int):
         '''
@@ -161,42 +148,42 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         where len_X is the length of input data
         '''
 
-        if (self.cluster_method_ == None):
+        if (self.cluster_method == None):
             
-            if (self.frac_ != None):
-                self.n_neighbors_ = int(np.ceil(self.frac_ * len_X))
-                self.n_subsets_ = int(len_X/self.n_neighbors_)
-                self.n_neighbors_ = int(len_X/self.n_subsets_)
+            if (self.frac != None):
+                self.n_neighbors = int(np.ceil(self.frac * len_X))
+                self.n_subsets = int(len_X/self.n_neighbors)
+                self.n_neighbors = int(len_X/self.n_subsets)
                 
-            if (self.n_subsets_ == None):
-                self.n_subsets_ = int(len_X/self.n_neighbors_)
+            if (self.n_subsets == None):
+                self.n_subsets = int(len_X/self.n_neighbors)
             
-            if (self.n_neighbors_ == None):
-                self.n_neighbors_ = int(len_X/self.n_subsets_)
+            if (self.n_neighbors == None):
+                self.n_neighbors = int(len_X/self.n_subsets)
             
-            if (self.n_neighbors_ >= len_X):
+            if (self.n_neighbors >= len_X):
                 warnings.warn('The number of neighbors is larger than \
                     the number of samples. Setting number of subsets to one.')
-                self.n_neighbors_ = len_X
-                self.n_subsets_ = 1
+                self.n_neighbors = len_X
+                self.n_subsets = 1
                 
-            if (self.n_subsets_ >= len_X):
+            if (self.n_subsets >= len_X):
                 warnings.warn('The number of subsets is larger than \
                     the number of samples. Setting number of neighbors to one.')            
-                self.n_neighbors_ = 1
-                self.n_subsets_ = len_X 
+                self.n_neighbors = 1
+                self.n_subsets = len_X 
             
-            if (self.n_subsets_ == 1):
+            if (self.n_subsets == 1):
                 warnings.warn('There is only one subset, so the \
                     global estimator is set to none.')
-                self.global_estimator_ = None
-                self.d_normalize_ = True
+                self.global_estimator = None
+                self.d_normalize = True
         else:
                 # When we use clustering, the number of 
                 # subsets may differ in each replication
-                self.frac_ = None
-                self.n_neighbors_=None
-                self.n_subsets_ = []
+                self.frac = None
+                self.n_neighbors=None
+                self.n_subsets = []
 
 
     def fit(self, X: np.array, y: np.array):
@@ -213,17 +200,17 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         # Check that X and y have correct shape
         X, y = check_X_y(X, y)
         
-        if (self.val_size_ != None):
+        if (self.val_size != None):
             # Validation set is not used for
             # global estimation
-            if (self.cluster_method_ == None):
+            if (self.cluster_method == None):
                 self._fitval(X, y)
             else:
                 self._fitvalc(X, y)
         else:
             # Validation set is used for
             # global estimation
-            if (self.cluster_method_ == None):
+            if (self.cluster_method == None):
                 self._fitnoval(X, y)
             else:
                 self._fitnovalc(X, y)
@@ -242,52 +229,52 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         # Check the validity of the input
         self._check_input(len_X)
         # A nearest neighbor tree is grown for querying
-        tree = self.tree_method_(X, self.n_subsets_)
-        self.replications_ = []
-        for i in range(self.n_replications_):
+        tree = self.tree_method(X, self.n_subsets)
+        self._replications = []
+        for i in range(self.n_replications):
             # Select n_subsets many samples to construct the local sample sets
-            sample_indices = self.rng_.choice(len_X, size=self.n_subsets_)
+            sample_indices = self._rng.choice(len_X, size=self.n_subsets)
             # Construct the local sample sets
-            _, neighbor_indices_list = tree.query(X[sample_indices], k=self.n_neighbors_)
+            _, neighbor_indices_list = tree.query(X[sample_indices], k=self.n_neighbors)
             local_models: List[LocalModelR] = []
-            dists = np.zeros((len_X, self.n_subsets_))            
-            predicts = np.zeros((len_X, self.n_subsets_))
+            dists = np.zeros((len_X, self.n_subsets))            
+            predicts = np.zeros((len_X, self.n_subsets))
             for neighbor_i, neighbor_indices in enumerate(neighbor_indices_list):
                 Xneighbors, yneighbors = X[neighbor_indices], y[neighbor_indices]
                 # Centroid is used as the center of the local sample set
                 local_center = np.mean(Xneighbors, axis=0)
-                if ('random_state' in self.local_estimator_().get_params().keys()):
-                    local_model = self.local_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+                if ('random_state' in self.local_estimator().get_params().keys()):
+                    local_model = self.local_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                             fit(Xneighbors, yneighbors)
                 else:
-                    local_model = self.local_estimator_().fit(Xneighbors, yneighbors)
+                    local_model = self.local_estimator().fit(Xneighbors, yneighbors)
                 local_models.append(LocalModelR(estimator=local_model, center=local_center))
                 predicts[:, neighbor_i] = local_model.predict(X)
                 
-                if (self.distance_function_ == None):
+                if (self.distance_function == None):
                     dists[:, neighbor_i] = rbf(X, local_center, \
-                        coeff=1.0/np.power(self.n_subsets_, 2.0))
+                        coeff=1.0/np.power(self.n_subsets, 2.0))
                 else:
-                    dists[:, neighbor_i] = self.distance_function_(X, local_center)
+                    dists[:, neighbor_i] = self.distance_function(X, local_center)
 
             # Normalize the distances from each sample to the local subsets
-            if (self.d_normalize_):
+            if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
                 dists = (dists.T/denom).T
             
-            if (self.global_estimator_ != None):
-                if ('random_state' in self.global_estimator_().get_params().keys()):
-                    global_model = self.global_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+            if (self.global_estimator != None):
+                if ('random_state' in self.global_estimator().get_params().keys()):
+                    global_model = self.global_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                         fit(dists * predicts, y)
                 else:
-                    global_model = self.global_estimator_().fit(dists * predicts, y)
+                    global_model = self.global_estimator().fit(dists * predicts, y)
             else:
                 global_model = None
 
-            self.replications_.append(ReplicationR(global_model, local_models))
+            self._replications.append(ReplicationR(global_model, local_models))
 
         return self
 
@@ -298,12 +285,12 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         Tree method is used (no clustering)
         '''
 
-        self.replications_ = []
-        for i in range(self.n_replications_):
+        self._replications = []
+        for i in range(self.n_replications):
             # Split for global estimation
             X_train, X_val, y_train, y_val = train_test_split(X, y,
-                test_size=self.val_size_,
-                random_state=self.rng_.integers(np.iinfo(np.int16).max))
+                test_size=self.val_size,
+                random_state=self._rng.integers(np.iinfo(np.int16).max))
 
             len_X_val: int = len(X_val)
             len_X_train: int = len(X_train)
@@ -312,51 +299,51 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 self._check_input(len_X_train)
             
             # A nearest neighbor tree is grown for querying
-            tree = self.tree_method_(X_train, self.n_subsets_)
+            tree = self.tree_method(X_train, self.n_subsets)
             
             # Select n_subsets many samples to construct the local sample sets
-            sample_indices = self.rng_.choice(len_X_train, size=self.n_subsets_)
+            sample_indices = self._rng.choice(len_X_train, size=self.n_subsets)
             # Construct the local sample sets
-            _, neighbor_indices_list = tree.query(X_train[sample_indices], k=self.n_neighbors_)
+            _, neighbor_indices_list = tree.query(X_train[sample_indices], k=self.n_neighbors)
             local_models: List[LocalModelR] = []
-            dists = np.zeros((len_X_val, self.n_subsets_))            
-            predicts = np.zeros((len_X_val, self.n_subsets_))
+            dists = np.zeros((len_X_val, self.n_subsets))            
+            predicts = np.zeros((len_X_val, self.n_subsets))
             for neighbor_i, neighbor_indices in enumerate(neighbor_indices_list):
                 Xneighbors, yneighbors = X_train[neighbor_indices], y_train[neighbor_indices]
                 # Centroid is used as the center of the local sample set
                 local_center = np.mean(Xneighbors, axis=0)
-                if ('random_state' in self.local_estimator_().get_params().keys()):
-                    local_model = self.local_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+                if ('random_state' in self.local_estimator().get_params().keys()):
+                    local_model = self.local_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                             fit(Xneighbors, yneighbors)
                 else:                
-                    local_model = self.local_estimator_().fit(Xneighbors, yneighbors)
+                    local_model = self.local_estimator().fit(Xneighbors, yneighbors)
                 local_models.append(LocalModelR(estimator=local_model, center=local_center))
                 predicts[:, neighbor_i] = local_model.predict(X_val)
                 
-                if (self.distance_function_ == None):
+                if (self.distance_function == None):
                     dists[:, neighbor_i] = rbf(X_val, local_center, \
-                        coeff=1.0/np.power(self.n_subsets_, 2.0))
+                        coeff=1.0/np.power(self.n_subsets, 2.0))
                 else:
-                    dists[:, neighbor_i] = self.distance_function_(X_val, local_center)
+                    dists[:, neighbor_i] = self.distance_function(X_val, local_center)
 
             # Normalize the distances from each sample to the local subsets
-            if (self.d_normalize_):
+            if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
                 dists = (dists.T/denom).T
             
-            if (self.global_estimator_ != None):
-                if ('random_state' in self.global_estimator_().get_params().keys()):
-                    global_model = self.global_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+            if (self.global_estimator != None):
+                if ('random_state' in self.global_estimator().get_params().keys()):
+                    global_model = self.global_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                             fit(dists * predicts, y_val)
                 else:
-                    global_model = self.global_estimator_().fit(dists * predicts, y_val)
+                    global_model = self.global_estimator().fit(dists * predicts, y_val)
             else:
                 global_model = None
 
-            self.replications_.append(ReplicationR(global_model, local_models))
+            self._replications.append(ReplicationR(global_model, local_models))
 
         return self
 
@@ -370,25 +357,25 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         # Check the validity of the input
         self._check_input(len_X)
         
-        if ('random_state' not in self.cluster_method_().get_params().keys()): 
+        if ('random_state' not in self.cluster_method().get_params().keys()): 
             warnings.warn('Clustering method is not random, so there is \
                 no need for replications, unless validaton set is used. \
                     Note that lack of replications may increase the variance.') 
             cluster_fit = self.cluster_method().fit(X)
-            self.n_replications_ = 1
+            self.n_replications = 1
 
-        self.replications_ = []
-        for i in range(self.n_replications_):
+        self._replications = []
+        for i in range(self.n_replications):
             
-            if (self.n_replications_ > 1):
+            if (self.n_replications > 1):
                 cluster_fit = self.cluster_method().\
-                    set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+                    set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                         fit(X)
                         
             # Some clustering methods may find less number of
             # clusters than requested 'n_clusters'
-            self.n_subsets_.append(len(np.unique(cluster_fit.labels_)))
-            n_subsets = self.n_subsets_[i]
+            self.n_subsets.append(len(np.unique(cluster_fit.labels_)))
+            n_subsets = self.n_subsets[i]
             
             local_models: List[LocalModelR] = []
             dists = np.zeros((len_X, n_subsets))            
@@ -407,39 +394,39 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                     local_center = cluster_fit.cluster_centers_[cluster_indx]
                 else:
                     local_center = np.mean(Xneighbors, axis=0)
-                if ('random_state' in self.local_estimator_().get_params().keys()):
-                    local_model = self.local_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+                if ('random_state' in self.local_estimator().get_params().keys()):
+                    local_model = self.local_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                             fit(Xneighbors, yneighbors)
                 else:
-                    local_model = self.local_estimator_().fit(Xneighbors, yneighbors)
+                    local_model = self.local_estimator().fit(Xneighbors, yneighbors)
                 local_models.append(LocalModelR(estimator=local_model, center=local_center))
                 predicts[:, cluster_indx] = local_model.predict(X)
                 
-                if (self.distance_function_ == None):
+                if (self.distance_function == None):
                     dists[:, cluster_indx] = rbf(X, local_center, \
                         coeff=1.0/np.power(n_subsets, 2.0))
                 else:
-                    dists[:, cluster_indx] = self.distance_function_(X, local_center)
+                    dists[:, cluster_indx] = self.distance_function(X, local_center)
                     
 
             # Normalize the distances from each sample to the local subsets
-            if (self.d_normalize_):
+            if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
                 dists = (dists.T/denom).T
             
-            if (self.global_estimator_ != None):
-                if ('random_state' in self.global_estimator_().get_params().keys()):
-                    global_model = self.global_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+            if (self.global_estimator != None):
+                if ('random_state' in self.global_estimator().get_params().keys()):
+                    global_model = self.global_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                         fit(dists * predicts, y)
                 else:
-                    global_model = self.global_estimator_().fit(dists * predicts, y)
+                    global_model = self.global_estimator().fit(dists * predicts, y)
             else:
                 global_model = None
 
-            self.replications_.append(ReplicationR(global_model, local_models))
+            self._replications.append(ReplicationR(global_model, local_models))
 
         return self
 
@@ -449,12 +436,12 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         Clustering is used (no tree method)
         '''
 
-        self.replications_ = []
-        for i in range(self.n_replications_):
+        self._replications = []
+        for i in range(self.n_replications):
             # Split for global estimation
             X_train, X_val, y_train, y_val = train_test_split(X, y,
-                test_size=self.val_size_,
-                random_state=self.rng_.integers(np.iinfo(np.int16).max))
+                test_size=self.val_size,
+                random_state=self._rng.integers(np.iinfo(np.int16).max))
 
             len_X_val: int = len(X_val)
             len_X_train: int = len(X_train)
@@ -462,9 +449,9 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
             if (i == 0):
                 self._check_input(len_X_train)
             
-            if ('random_state' in self.cluster_method_().get_params().keys()):
+            if ('random_state' in self.cluster_method().get_params().keys()):
                 cluster_fit = self.cluster_method().\
-                    set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+                    set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                         fit(X_train)
             else:
                 cluster_fit = self.cluster_method().fit(X_train)
@@ -476,8 +463,8 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                     use_cluster_centers = False
                 
             # Since each replication returns
-            self.n_subsets_.append(len(np.unique(cluster_fit.labels_)))
-            n_subsets = self.n_subsets_[i]
+            self.n_subsets.append(len(np.unique(cluster_fit.labels_)))
+            n_subsets = self.n_subsets[i]
             
             local_models: List[LocalModelR] = []
             dists = np.zeros((len_X_val, n_subsets))            
@@ -490,38 +477,38 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                     local_center = cluster_fit.cluster_centers_[cluster_indx]
                 else:
                     local_center = np.mean(Xneighbors, axis=0)
-                if ('random_state' in self.local_estimator_().get_params().keys()):
-                    local_model = self.local_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+                if ('random_state' in self.local_estimator().get_params().keys()):
+                    local_model = self.local_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                             fit(Xneighbors, yneighbors)
                 else:                
-                    local_model = self.local_estimator_().fit(Xneighbors, yneighbors)
+                    local_model = self.local_estimator().fit(Xneighbors, yneighbors)
                 local_models.append(LocalModelR(estimator=local_model, center=local_center))
                 predicts[:, cluster_indx] = local_model.predict(X_val)
                 
-                if (self.distance_function_ == None):
+                if (self.distance_function == None):
                     dists[:, cluster_indx] = rbf(X_val, local_center, \
                         coeff=1.0/np.power(n_subsets, 2.0))
                 else:
-                    dists[:, cluster_indx] = self.distance_function_(X_val, local_center)
+                    dists[:, cluster_indx] = self.distance_function(X_val, local_center)
 
             # Normalize the distances from each sample to the local subsets
-            if (self.d_normalize_):
+            if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
                 dists = (dists.T/denom).T
             
-            if (self.global_estimator_ != None):
-                if ('random_state' in self.global_estimator_().get_params().keys()):
-                    global_model = self.global_estimator_().\
-                        set_params(random_state=self.rng_.integers(np.iinfo(np.int16).max)).\
+            if (self.global_estimator != None):
+                if ('random_state' in self.global_estimator().get_params().keys()):
+                    global_model = self.global_estimator().\
+                        set_params(random_state=self._rng.integers(np.iinfo(np.int16).max)).\
                             fit(dists * predicts, y_val)
                 else:
-                    global_model = self.global_estimator_().fit(dists * predicts, y_val)
+                    global_model = self.global_estimator().fit(dists * predicts, y_val)
             else:
                 global_model = None
 
-            self.replications_.append(ReplicationR(global_model, local_models))
+            self._replications.append(ReplicationR(global_model, local_models))
 
         return self
 
@@ -537,14 +524,14 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
         len_X0: int = len(X0)
         yhat = np.zeros(len_X0)
-        for i in range(self.n_replications_):
+        for i in range(self.n_replications):
             # Get the fitted global and local estimators
-            global_model = self.replications_[i].global_estimator
-            local_models = self.replications_[i].local_estimators
-            if (self.cluster_method_ == None):
-                n_subsets = self.n_subsets_
+            global_model = self._replications[i].global_estimator
+            local_models = self._replications[i].local_estimators
+            if (self.cluster_method == None):
+                n_subsets = self.n_subsets
             else:
-                n_subsets = self.n_subsets_[i]
+                n_subsets = self.n_subsets[i]
             predicts = np.zeros((len_X0, n_subsets))
             dists = np.zeros((len_X0, n_subsets))
             for j in range(n_subsets):
@@ -552,14 +539,14 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 local_model = local_models[j].estimator
                 predicts[:, j] = local_model.predict(X0)
                 
-                if (self.distance_function_ == None):
+                if (self.distance_function == None):
                     dists[:, j] = rbf(X0, local_center, \
                         coeff=1.0/np.power(n_subsets, 2.0))
                 else:
-                    dists[:, j] = self.distance_function_(X0, local_center)
+                    dists[:, j] = self.distance_function(X0, local_center)
 
             # Normalize the distances from each sample to the local subsets
-            if (self.d_normalize_):
+            if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
                 dists = (dists.T/denom).T
@@ -580,37 +567,37 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         if (self._isfitted == False):
             warnings.warn('You need to fit LESS first.')
 
-        return self.n_subsets_
+        return self.n_subsets
     
     def get_n_neighbors(self):
         
-        if (self.cluster_method_ != None):
+        if (self.cluster_method != None):
             warnings.warn('Number of neighbors is not fixed when clustering is used.')
         elif (self._isfitted == False):
             warnings.warn('You need to fit LESS first.')
             
-        return self.n_neighbors_
+        return self.n_neighbors
     
     def get_frac(self):
         
         # Fraction is set to None only if clustering method is given
-        if (self.cluster_method_ != None):
+        if (self.cluster_method != None):
             warnings.warn('Parameter frac is not set when clustering is used.')
 
-        return self.frac_
+        return self.frac
     
     def get_n_replications(self):
         
-        return self.n_replications_
+        return self.n_replications
     
     def get_d_normalize(self):
         
-        return self.d_normalize_
+        return self.d_normalize
     
     def get_val_size(self):
         
-        return self.val_size_
+        return self.val_size
     
     def get_random_state(self):
         
-        return self.random_state_
+        return self.random_state
