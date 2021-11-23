@@ -176,14 +176,14 @@ def less_bias_vs_variance(X, y):
             LESS_fit = LESSestimator.fit(X, y)
             fmy = sns.lineplot(x=xvals, y=LESS_fit.predict(xvals.reshape(len(xvals), 1)),\
                 ax=axs[i, j], color=next(palette))
-            fmy.set_title('Fraction of Samples (frac=' + str(LESS_fit.frac_) + ')')
+            fmy.set_title('Fraction of Samples (frac=' + str(LESS_fit.frac) + ')')
             fmy.set_ylim([ylb, yub])
             fmy.set(xticklabels=[])
             fmy.set(yticklabels=[])
-            txt = str(LESS_fit.n_replications_) + ' replications'
+            txt = str(LESS_fit.n_replications) + ' replications'
             fmy.text(xlb, yub-3, txt, color='red')
-            txt = '(' + str(LESS_fit.n_subsets_) + ' subsets and ' \
-                    + str(LESS_fit.n_neighbors_) + ' neighbors)'
+            txt = '(' + str(LESS_fit.n_subsets) + ' subsets and ' \
+                    + str(LESS_fit.n_neighbors) + ' neighbors)'
             fmy.text(xlb, ylb+1, txt)
             
     plt.tight_layout()
