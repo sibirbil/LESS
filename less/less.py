@@ -151,7 +151,6 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
             if (self.frac != None):
                 self.n_neighbors = int(np.ceil(self.frac * len_X))
                 self.n_subsets = int(len_X/self.n_neighbors)
-                self.n_neighbors = int(len_X/self.n_subsets)
                 
             if (self.n_subsets == None):
                 self.n_subsets = int(len_X/self.n_neighbors)
@@ -251,7 +250,6 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                     local_model = self.local_estimator().fit(Xneighbors, yneighbors)
                 local_models.append(LocalModelR(estimator=local_model, center=local_center))
                 predicts[:, neighbor_i] = local_model.predict(X)
-                
                 if (self.distance_function == None):
                     dists[:, neighbor_i] = rbf(X, local_center, \
                         coeff=1.0/np.power(self.n_subsets, 2.0))
