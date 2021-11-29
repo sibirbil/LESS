@@ -17,7 +17,7 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 
 class SklearnEstimator:
     '''
-    This base class is dummy. It is used just for guideline. 
+    This base class is dummy. It is used just for guideline.
     '''
     def fit(self, X: np.array, y: np.array):
         raise NotImplementedError('Needs to implement fit(X, y)')
@@ -40,7 +40,7 @@ class ReplicationR(NamedTuple):
 def rbf(data, center, coeff=0.01):
     '''
     RBF kernel - L2 norm
-    This is is used by the default distance function in LESS 
+    This is is used by the default distance function in LESS
     '''
     return np.exp(-coeff * np.linalg.norm(np.array(data - center, dtype=float), ord=2, axis=1))
 
@@ -68,14 +68,14 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 e.g., df(subset, sample) which returns a vector of distances
                 (default is RBF(subset, sample, 1.0/n_subsets^2))
     '''
-    def __init__(self, frac=None, n_neighbors=None, n_subsets=None, 
+    def __init__(self, frac=None, n_neighbors=None, n_subsets=None,
                  n_replications=20, d_normalize=True, val_size=None, random_state=None,
                  tree_method=lambda data, n_subsets: KDTree(data, n_subsets),
                  cluster_method=None,
                  local_estimator=lambda: LinearRegression(),
                  global_estimator=lambda: LinearRegression(),
                  distance_function: Callable[[np.array, np.array], np.array]=None):
-        
+
         self.local_estimator = local_estimator
         self.global_estimator = global_estimator
         self.tree_method = tree_method
@@ -88,7 +88,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         self.d_normalize = d_normalize
         self.val_size = val_size
         self.random_state = random_state
-    
+
     def _set_local_attributes(self):
         '''
         Storing the local variables and
@@ -98,21 +98,21 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         self._rng = np.random.default_rng(self.random_state)
         self._replications: Optional[List[ReplicationR]] = None
         self._isfitted = False
-        
+
         if(self.local_estimator == None):
             raise ValueError('LESS does not work without a local estimator.')
-            
+
         if (self.val_size != None):            
             if(self.val_size <= 0.0 or self.val_size >= 1.0):
                 raise ValueError('Parameter val_size should be in the interval (0, 1).')
-        
+
         if(self.frac != None):
             if(self.frac <= 0.0 or self.frac > 1.0):
                 raise ValueError('Parameter frac should be in the interval (0, 1].')
 
         if (self.n_replications < 1):
             raise ValueError('The number of replications should greater than equal to one.')
-                        
+
         if (self.cluster_method != None):
             if (self.frac != None):
                 warnings.warn('Both frac and cluster_method parameters are provided. \
@@ -128,12 +128,12 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                     # the weight (1/self.n_subsets) to each local estimator
                     self.global_estimator = None
                     self.d_normalize = True
-                    # If there is also no validation step, then there is 
+                    # If there is also no validation step, then there is
                     # no randomness. So, no need for replications.
                     if (self.val_size == None):
                         warnings.warn('Since validation set is not used, \
                             there is no randomness, and hence, \
-                                no need for replications.')                        
+                                no need for replications.')
                         self.n_replications = 1
         elif(self.frac == None and 
              self.n_neighbors== None and
@@ -213,7 +213,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 self._fitnoval(X, y)
             else:
                 self._fitnovalc(X, y)
-        
+
         self._isfitted = True
         
         return self
