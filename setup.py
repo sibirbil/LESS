@@ -14,7 +14,8 @@ setup(name='LESS',
       license='MIT',
       packages=['less'],
       zip_safe=False,
+      python_requires='>=3.6',
       install_requires=[
         'scikit-learn>=1.0.1',
         'numpy>=1.21.4'
-      ]),
+      ])
