@@ -26,3 +26,12 @@ def energy(wd):
     df = pd.read_csv(wd+'energydata_complete.csv', header = None)
     df.columns = ['X_' + str(i) for i in range(len(df.columns)-1)] + ['y']
     return df
+
+def superconduct(wd):
+    '''
+    21263 x 81
+    https://archive.ics.uci.edu/ml/datasets/Superconductivty+Data
+    '''
+    df = pd.read_csv(wd+'superconduct.csv', header = None)
+    df.columns = ['X_' + str(i) for i in range(len(df.columns)-1)] + ['y']
+    return df
