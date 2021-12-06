@@ -3,7 +3,7 @@ from setuptools import setup
 with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
 
-setup(name='less-estimator',
+setup(name='lesstimator',
       version='0.1.0',
       description='Learning with Subset Stacking',
       long_description=long_description,
