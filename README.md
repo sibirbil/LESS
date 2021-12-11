@@ -44,7 +44,16 @@ print('Test error of LESS: {0:.2f}'.format(mean_squared_error(y_pred, y_test)))
 
 Our **two-part** [tutorial](https://colab.research.google.com/drive/183MRHH-i4XT3-HepHbIKVRPiwH7uMzrw?usp=sharing) aims at getting you familiar with LESS. If you want to try the tutorials on your own computer, then you also need to install the following additional packages: `pandas`, `matplotlib`, and `seaborn`.
 
-
+## Citation
+Our software can be cited as:
+````
+  @misc{LESS,
+    author = "Ilker Birbil",
+    title = "LESS: LEarning with Subset Stacking",
+    year = 2021,
+    url = "https://github.com/sibirbil/LESS/"
+  }
+````
 
 #### Acknowledgments
 
