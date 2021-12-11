@@ -12,7 +12,7 @@ import seaborn as sns
 from less import LESSRegressor
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.kernel_ridge import KernelRidge
-from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
@@ -46,7 +46,7 @@ def synthetic_sine_curve(n_samples=200):
     f1 = sns.lineplot(x=xvals, y=10*np.sin(xvals), color='red')
     f1 = sns.scatterplot(x = X[:,0], y = y, alpha=0.5)
     f1.set_ylim([-15.0, 15.0])
-    f1.set(xticklabels=[], yticklabels=[], title='Synthetic Data');
+    f1.set(xticklabels=[], yticklabels=[], title='Synthetic Data')
     
     plt.tight_layout()
     plt.show()
@@ -89,11 +89,11 @@ def compare_1D_plots(X, y):
     f2.set_ylim([ylb, yub])
     f2.set(xticklabels=[], yticklabels=[], title='Random Forest')
 
-    ADA = AdaBoostRegressor()
-    ADA_fit = ADA.fit(X, y)
-    f3 = sns.lineplot(x=xvals, y=ADA_fit.predict(xvals.reshape(len(xvals), 1)), ax=axs[1, 0], color=next(palette))
+    GB = GradientBoostingRegressor()
+    GB_fit = GB.fit(X, y)
+    f3 = sns.lineplot(x=xvals, y=GB_fit.predict(xvals.reshape(len(xvals), 1)), ax=axs[1, 0], color=next(palette))
     f3.set_ylim([ylb, yub])
-    f3.set(xticklabels=[], yticklabels=[], title='AdaBoost')
+    f3.set(xticklabels=[], yticklabels=[], title='Gradient Boosting')
 
     KNN = KNeighborsRegressor(n_neighbors=5)
     KNN_fit = KNN.fit(X, y)
@@ -210,11 +210,11 @@ def timings(X, y):
     endtime = time.time()
     AllTimes['RF'] = [endtime-starttime]
 
-    est = AdaBoostRegressor()
+    est = GradientBoostingRegressor()
     starttime = time.time()
     est.fit(X, y)
     endtime = time.time()
-    AllTimes['ADA'] = [endtime-starttime]
+    AllTimes['GB'] = [endtime-starttime]
 
     est = KNeighborsRegressor()
     starttime = time.time()

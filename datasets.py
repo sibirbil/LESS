@@ -6,7 +6,7 @@
 
 import pandas as pd
 
-def abalone(wd): 
+def abalone(wd):
     '''
     4176 x 7
     The first categorical feature is removed
