@@ -33,7 +33,7 @@ class ReplicationR(NamedTuple):
     global_estimator: SklearnEstimator
     local_estimators: List[LocalModelR]
 
-############################    
+############################
 
 
 ############################
@@ -106,7 +106,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
             if(self.val_size <= 0.0 or self.val_size >= 1.0):
                 raise ValueError('Parameter val_size should be in the interval (0, 1).')
 
-        if(self.frac != None):
+        if (self.frac != None):
             if(self.frac <= 0.0 or self.frac > 1.0):
                 raise ValueError('Parameter frac should be in the interval (0, 1].')
 
@@ -193,7 +193,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         - Fitting with clustering (no) validation set)
         - Fitting with validation set and clustering
         '''
-        
+
         # Check that X and y have correct shape
         X, y = check_X_y(X, y)
         
@@ -256,7 +256,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 else:
                     dists[:, neighbor_i] = self.distance_function(X, local_center)
 
-            # Normalize the distances from each sample to the local subsets
+            # Normalize the distances from samples to the local subsets
             if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
@@ -325,7 +325,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 else:
                     dists[:, neighbor_i] = self.distance_function(X_val, local_center)
 
-            # Normalize the distances from each sample to the local subsets
+            # Normalize the distances from samples to the local subsets
             if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
@@ -355,10 +355,10 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         # Check the validity of the input
         self._check_input(len_X)
         
-        if ('random_state' not in self.cluster_method().get_params().keys()): 
+        if ('random_state' not in self.cluster_method().get_params().keys()):
             warnings.warn('Clustering method is not random, so there is \
                 no need for replications, unless validaton set is used. \
-                    Note that lack of replications may increase the variance.') 
+                    Note that lack of replications may increase the variance.')
             cluster_fit = self.cluster_method().fit(X)
             self.n_replications = 1
 
@@ -408,7 +408,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                     dists[:, cluster_indx] = self.distance_function(X, local_center)
                     
 
-            # Normalize the distances from each sample to the local subsets
+            # Normalize the distances from samples to the local subsets
             if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
@@ -490,7 +490,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 else:
                     dists[:, cluster_indx] = self.distance_function(X_val, local_center)
 
-            # Normalize the distances from each sample to the local subsets
+            # Normalize the distances from samples to the local subsets
             if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
@@ -543,7 +543,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 else:
                     dists[:, j] = self.distance_function(X0, local_center)
 
-            # Normalize the distances from each sample to the local subsets
+            # Normalize the distances from samples to the local subsets
             if (self.d_normalize):
                 denom = np.sum(dists, axis=1)
                 denom[denom < 1.0e-8] = 1.0e-8
