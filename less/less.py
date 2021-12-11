@@ -17,11 +17,11 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 
 class SklearnEstimator:
     '''
-    This base class is dummy. It is used just for guideline.
+    Dummy base class
     '''
     def fit(self, X: np.array, y: np.array):
         '''
-        Dummy fit function.
+        Dummy fit function
         '''
         raise NotImplementedError('Needs to implement fit(X, y)')
 
@@ -33,14 +33,14 @@ class SklearnEstimator:
 
 class LocalModelR(NamedTuple):
     '''
-    Auxiliary class to hold local estimators for regression.
+    Auxiliary class to hold the local estimators for regression
     '''
     estimator: SklearnEstimator
     center: np.array
 
 class ReplicationR(NamedTuple):
     '''
-    Auxiliary class to hold the replications for regression.
+    Auxiliary class to hold the replications for regression
     '''
     global_estimator: SklearnEstimator
     local_estimators: List[LocalModelR]
@@ -52,7 +52,7 @@ class ReplicationR(NamedTuple):
 def rbf(data, center, coeff=0.01):
     '''
     RBF kernel - L2 norm
-    This is is used by the default distance function in LESS
+    This is is used as the default distance function in LESS
     '''
     return np.exp(-coeff * np.linalg.norm(np.array(data - center, dtype=float), ord=2, axis=1))
 
@@ -118,8 +118,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def _set_local_attributes(self):
         '''
-        Storing the local variables and
-        checking the given parameters
+        Storing the local variables and checking the given parameters
         '''
 
         if self.local_estimator is None:
@@ -165,8 +164,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def _check_input(self, len_X: int):
         '''
-        Checks whether the input is valid,
-        where len_X is the length of input data
+        Checks whether the input is valid (len_X is the length of input data)
         '''
 
         if self.cluster_method is None:
@@ -208,13 +206,12 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def fit(self, X: np.array, y: np.array):
         '''
-        Dummy fit function that calls the proper method
-        according to validation and clustering parameters.
+        Dummy fit function that calls the proper method according to validation and clustering parameters.
         Options are:
-        - Default fitting (no validation set, no clustering)
-        - Fitting with validation set (no clustering)
-        - Fitting with clustering (no) validation set)
-        - Fitting with validation set and clustering
+          - Default fitting (no validation set, no clustering)
+          - Fitting with validation set (no clustering)
+          - Fitting with clustering (no) validation set)
+          - Fitting with validation set and clustering
         '''
 
         # Check that X and y have correct shape
@@ -243,7 +240,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def _fitnoval(self, X: np.array, y: np.array):
         '''
-        Fit function: All data is used for global estimator (no validation)
+        Fit function: All data is used with the global estimator (no validation)
         Tree method is used (no clustering)
         '''
 
@@ -302,7 +299,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def _fitval(self, X: np.array, y: np.array):
         '''
-        Fit function: (val_size x data) is used for global estimator (validation)
+        Fit function: (val_size x data) is used for the global estimator (validation)
         Tree method is used (no clustering)
         '''
 
@@ -370,7 +367,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def _fitnovalc(self, X: np.array, y: np.array):
         '''
-        Fit function: All data is used for global estimator (no validation)
+        Fit function: All data is used for the global estimator (no validation)
         Clustering is used (no tree method)
         '''
 
@@ -452,7 +449,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def _fitvalc(self, X: np.array, y: np.array):
         '''
-        Fit function: (val_size x data) is used for global estimator (validation)
+        Fit function: (val_size x data) is used for the global estimator (validation)
         Clustering is used (no tree method)
         '''
 
@@ -582,7 +579,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def get_n_subsets(self):
         '''
-        Auxiliary function returning the number of subsets.
+        Auxiliary function returning the number of subsets
         '''
         if not self._isfitted:
             warnings.warn('You need to fit LESS first.')
@@ -591,7 +588,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def get_n_neighbors(self):
         '''
-        Auxiliary function returning the number of neighbors.
+        Auxiliary function returning the number of neighbors
         '''
         if self.cluster_method is not None:
             warnings.warn('Number of neighbors is not fixed when clustering is used.')
@@ -602,7 +599,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def get_frac(self):
         '''
-        Auxiliary function returning the percentage of samples used to set the number of neighbors.
+        Auxiliary function returning the percentage of samples used to set the number of neighbors
         '''
         # Fraction is set to None only if clustering method is given
         if self.cluster_method is not None:
@@ -612,24 +609,24 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
 
     def get_n_replications(self):
         '''
-        Auxiliary function returning the number of replications.
+        Auxiliary function returning the number of replications
         '''
         return self.n_replications
 
     def get_d_normalize(self):
         '''
-        Auxiliary function returning flag for normalization.
+        Auxiliary function returning flag for normalization
         '''
         return self.d_normalize
 
     def get_val_size(self):
         '''
-        Auxiliary function returning the validation set size.
+        Auxiliary function returning the validation set size
         '''
         return self.val_size
 
     def get_random_state(self):
         '''
-        Auxiliary function returning the random seed.
+        Auxiliary function returning the random seed
         '''
         return self.random_state
