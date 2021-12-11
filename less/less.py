@@ -79,6 +79,17 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
         distance_function : distance function evaluating the distance from a subset to a sample,
                 e.g., df(subset, sample) which returns a vector of distances
                 (default is RBF(subset, sample, 1.0/n_subsets^2))
+                
+    Recommendation
+    --------------
+    Default implementation of LESS uses Euclidean distances with radial basis function.
+    Therefore, it is a good idea to scale the input data before fitting.
+
+    For example, let X be the unscaled data, then you can use
+        
+        from sklearn.preprocessing import StandardScaler
+        X = StandardScaler().fit_transform(X)
+    
     '''
     def __init__(self, frac=None, n_neighbors=None, n_subsets=None,
                  n_replications=20, d_normalize=True, val_size=None, random_state=None,
