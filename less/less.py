@@ -82,7 +82,7 @@ class LESSRegressor(RegressorMixin, BaseEstimator, SklearnEstimator):
                 
     Recommendation
     --------------
-    Default implementation of LESS uses Euclidean distances with radial basis function.
+    Default implementation of LESSRegressor uses Euclidean distances with radial basis function.
     Therefore, it is a good idea to scale the input data before fitting.
 
     For example, let X be the unscaled data, then you can use
