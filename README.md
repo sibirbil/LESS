@@ -57,7 +57,7 @@ Our software can be cited as:
 
 ## Parallel Version
 
-An `openmpi` version of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
+An `openmpi` implementation of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
 
 #### Acknowledgments
 
