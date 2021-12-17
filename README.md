@@ -12,6 +12,8 @@ or
 
 `conda install -c conda-forge less-learn`
 
+(see also [conda-smithy repository](https://github.com/conda-forge/less-learn-feedstock))
+
 ## Testing
 
 Here is how you can use LESS for regression (we are working on classification):
