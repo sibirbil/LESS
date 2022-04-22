@@ -51,7 +51,7 @@ print('Test error of LESS: {0:.2f}'.format(mean_squared_error(y_pred, y_test)))
 Our **two-part** [tutorial on Colab](https://colab.research.google.com/drive/183MRHH-i4XT3-HepHbIKVRPiwH7uMzrw?usp=sharing) aims at getting you familiar with LESS. If you want to try the tutorials on your own computer, then you also need to install the following additional packages: `pandas`, `matplotlib`, and `seaborn`.
 
 ## Scaling
-Since LESS evaluates distances between sample points, we strongly recommend scaling the data before applying LESS. In our experiments, we have used the `StandardScaler` function from the package `sklearn.preprocessing.StandardScaler` for both the input and the output. Here is an example:
+Since LESS evaluates distances between sample points, we strongly recommend scaling the data before applying the method. In our experiments, we have used the `StandardScaler` function from the package `sklearn.preprocessing.StandardScaler` for both the input and the output. Here is an example:
 
 ```python
 from sklearn.preprocessing import StandardScaler
