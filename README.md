@@ -56,7 +56,7 @@ Since LESS evaluates distances between sample points, we strongly recommend scal
 ```python
 from sklearn.preprocessing import StandardScaler
 X = StandardScaler().fit_transform(X)
-
+```
 
 ## Citation
 Our software can be cited as:
