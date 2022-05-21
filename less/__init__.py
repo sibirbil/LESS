@@ -1,1 +1,1 @@
-from .less import LESSRegressor
+from .less import LESSRegressor, LESSClassifier
