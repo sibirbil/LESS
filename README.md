@@ -8,12 +8,6 @@ LESS is a supervised learning algorithm that is based on training many local est
 
 `pip install less-learn`
 
-or
-
-`conda install -c conda-forge less-learn`
-
-(see also [conda-smithy repository](https://github.com/conda-forge/less-learn-feedstock))
-
 ## Testing
 
 Here is how you can use LESS:
