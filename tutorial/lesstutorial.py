@@ -77,7 +77,7 @@ def compare_1D_plots(X, y):
     xvals = np.arange(xlb, xub, 0.1) # domain
     ylb, yub = np.floor(np.min(y)-1), np.ceil(np.max(y)+1)
     
-    LESSestimator = LESSRegressor()
+    LESSestimator = LESSRegressor(global_estimator=LinearRegression)
     LESS_fit = LESSestimator.fit(X, y)
     f1 = sns.lineplot(x=xvals, y=LESS_fit.predict(xvals.reshape(len(xvals), 1)), ax=axs[0, 0], color=next(palette))
     f1.set_ylim([ylb, yub])
@@ -172,7 +172,7 @@ def less_bias_vs_variance(X, y):
 
     for i, rep in enumerate(repvals):
         for j, fr in enumerate(fracvals):
-            LESSestimator = LESSRegressor(frac=fr, n_replications=rep)
+            LESSestimator = LESSRegressor(global_estimator=LinearRegression, frac=fr, n_replications=rep)
             LESS_fit = LESSestimator.fit(X, y)
             fmy = sns.lineplot(x=xvals, y=LESS_fit.predict(xvals.reshape(len(xvals), 1)),\
                 ax=axs[i, j], color=next(palette))
@@ -198,7 +198,7 @@ def timings(X, y):
 
     AllTimes = {}
     
-    est = LESSRegressor()
+    est = LESSRegressor(global_estimator=LinearRegression)
     starttime = time.time()
     est.fit(X, y)
     endtime = time.time()
