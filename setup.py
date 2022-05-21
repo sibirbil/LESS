@@ -4,7 +4,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(name='less-learn',
-      version='0.1.0',
+      version='0.2.0',
       description='Learning with Subset Stacking',
       long_description=long_description,
       long_description_content_type="text/markdown",
@@ -17,5 +17,5 @@ setup(name='less-learn',
       python_requires='>=3.6',
       install_requires=[
         'scikit-learn>=1.0.1',
-        'numpy>=1.21.4'
+        'numpy>=1.21.5'
       ])

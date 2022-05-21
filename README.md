@@ -1,6 +1,6 @@
 # Learning with Subset Stacking (LESS)
 
-LESS is a new supervised learning algorithm that is based on training many local estimators on subsets of a given dataset, and then passing their predictions to a global estimator. You can find the details about LESS in our [manuscript](https://arxiv.org/abs/2112.06251).
+LESS is a supervised learning algorithm that is based on training many local estimators on subsets of a given dataset, and then passing their predictions to a global estimator. You can find the details about LESS in our [manuscript](https://arxiv.org/abs/2112.06251).
 
 ![LESS](./img/LESS1Level.png)
 
@@ -16,46 +16,61 @@ or
 
 ## Testing
 
-Here is how you can use LESS for regression (we are working on classification):
+Here is how you can use LESS:
 
 ```python
-import numpy as np
-
+from sklearn.datasets import make_regression, make_classification
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
-from less import LESSRegressor
+from sklearn.metrics import mean_squared_error, accuracy_score
+from less import LESSRegressor, LESSClassifier
 
-# Synthetic dataset (X, y)
-xvals = np.arange(-10, 10, 0.1) # domain
-num_of_samples = 200
-X = np.zeros((num_of_samples, 1))
-y = np.zeros(num_of_samples)
-for i in range(num_of_samples):
-    xran = -10 + 20*np.random.rand()
-    X[i] = xran
-    y[i] = 10*np.sin(xran) + 2.5*np.random.randn()
+### CLASSIFICATION ###
+
+X, y = make_classification(n_samples=1000, n_features=20, n_classes=3, \
+                           n_clusters_per_class=2, n_informative=10, random_state=42)
 
 # Train and test split
 X_train, X_test, y_train, y_test = \
-    train_test_split(X, y, test_size=0.3)
+    train_test_split(X, y, test_size=0.3, random_state=42)
 
 # LESS fit() & predict()
-LESS_model = LESSRegressor()
+LESS_model = LESSClassifier(random_state=42)
+LESS_model.fit(X_train, y_train)
+y_pred = LESS_model.predict(X_test)
+print('Test accuracy of LESS: {0:.2f}'.format(accuracy_score(y_pred, y_test)))
+
+
+### REGRESSION ###
+
+X, y = make_regression(n_samples=1000, n_features=20, random_state=42)
+
+# Train and test split
+X_train, X_test, y_train, y_test = \
+    train_test_split(X, y, test_size=0.3, random_state=42)
+
+# LESS fit() & predict()
+LESS_model = LESSRegressor(random_state=42)
 LESS_model.fit(X_train, y_train)
 y_pred = LESS_model.predict(X_test)
 print('Test error of LESS: {0:.2f}'.format(mean_squared_error(y_pred, y_test)))
+
 ```
 
 ## Tutorials
 
-Our **two-part** [tutorial on Colab](https://colab.research.google.com/drive/183MRHH-i4XT3-HepHbIKVRPiwH7uMzrw?usp=sharing) aims at getting you familiar with LESS. If you want to try the tutorials on your own computer, then you also need to install the following additional packages: `pandas`, `matplotlib`, and `seaborn`.
+Our **two-part** [tutorial on Colab](https://colab.research.google.com/drive/183MRHH-i4XT3-HepHbIKVRPiwH7uMzrw?usp=sharing) aims at getting you familiar with LESS regression. If you want to try the tutorials on your own computer, then you also need to install the following additional packages: `pandas`, `matplotlib`, and `seaborn`.
 
-## Scaling
-Since LESS evaluates distances between sample points, we strongly recommend scaling the data before applying the method. In our experiments, we have used the `StandardScaler` function from the package `sklearn.preprocessing.StandardScaler` for both the input and the output. Here is an example:
+## Recommendation
+
+Default implementation of LESS uses Euclidean distances with radial basis function. Therefore, it is a good idea to scale the input data before fitting. This can be done by setting the parameter `scaling` to `True` (the default value) or preprocessing the data
+as follows:
 
 ```python
 from sklearn.preprocessing import StandardScaler
-X = StandardScaler().fit_transform(X)
+
+SC = StandardarScaler()
+X_train = SC.fit_transform(X_train)
+X_test = SC.transform(X_test)
 ```
 
 ## Citation
@@ -71,7 +86,20 @@ Our software can be cited as:
 
 ## Parallel Version
 
+**NOTE**: Parallel version of LESS has not been updated yet. Soon...
+
 An `openmpi` implementation of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
+
+
+## Changes in v.0.2.0
+
+* Classification is added (`LESSClassifier`)
+* Scaling is automatically done as default (`scaling = True`)
+* The default global estimator for regression is now `DecisionTreeRegressor` instead of `LinearRegression` (`global_estimator=DecisionTreeRegressor`)
+* Warnings can be turned on or off with a flag (`warnings = True`)
+
+
+---
 
 #### Acknowledgments
 
