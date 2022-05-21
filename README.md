@@ -10,7 +10,7 @@ LESS is a supervised learning algorithm that is based on training many local est
 
 or
 
-`conda install -c cf-staging less-learn`
+``conda install -c conda-forge less-learn``
 
 (see also [conda-smithy repository](https://github.com/conda-forge/less-learn-feedstock))
 
