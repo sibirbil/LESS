@@ -58,7 +58,7 @@ print('Test error of LESS: {0:.2f}'.format(mean_squared_error(y_pred, y_test)))
 
 ## Tutorials
 
-Our **two-part** [tutorial on Colab](https://colab.research.google.com/drive/183MRHH-i4XT3-HepHbIKVRPiwH7uMzrw?usp=sharing) aims at getting you familiar with LESS regression. If you want to try the tutorials on your own computer, then you also need to install the following additional packages: `pandas`, `matplotlib`, and `seaborn`.
+Our **two-part** [tutorial on Colab](https://colab.research.google.com/drive/183MRHH-i4XT3-HepHbIKVRPiwH7uMzrw?usp=sharing) aims at getting you familiar with LESS **regression**. If you want to try the tutorials on your own computer, then you also need to install the following additional packages: `pandas`, `matplotlib`, and `seaborn`.
 
 ## Recommendation
 
@@ -85,10 +85,7 @@ Our software can be cited as:
 
 ## Parallel Version
 
-**NOTE**: Parallel version of LESS has not been updated yet. Soon...
-
 An `openmpi` implementation of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
-
 
 ## Changes in v.0.2.0
 
@@ -97,6 +94,11 @@ An `openmpi` implementation of LESS is also available in [another repository](ht
 * The default global estimator for regression is now `DecisionTreeRegressor` instead of `LinearRegression` (`global_estimator=DecisionTreeRegressor`)
 * Warnings can be turned on or off with a flag (`warnings = True`)
 
+## Changes in v.0.3.0
+
+* Typos are corrected
+* The hidden class for the binary classifier is now separate
+* Local subsets with a single class are handled (the case of `ConstantPredictor`)
 
 ---
 
