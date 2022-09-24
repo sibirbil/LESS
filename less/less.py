@@ -718,7 +718,7 @@ class _LESSBC(_LESS, ClassifierMixin):
                 yhat[rowsums < 0, i] = -1
                 yhat[rowsums >= 0, i] = 1
 
-        yhat = mode(yhat.astype(int), axis=1).mode.reshape(1, -1)[0]
+        yhat = mode(yhat.astype(int), axis=1, keepdims=False).mode.reshape(1, -1)[0]
 
         # Convert to original labels
         ymin1 = yhat == -1
@@ -780,7 +780,7 @@ class _LESSBC(_LESS, ClassifierMixin):
                 yhat[rowsums < 0, i] = 0
                 yhat[rowsums >= 0, i] = 1
 
-        md, cnt = mode(yhat, axis=1)
+        md, cnt = mode(yhat, axis=1, keepdims=False)
         yhat = md.reshape(1, -1)[0]
         cnt = cnt.reshape(1, -1)[0]
         yhat0 = yhat==0
