@@ -591,7 +591,7 @@ class _LESS(BaseEstimator, SklearnEstimator):
 
 class _LESSBC(_LESS, ClassifierMixin):
     '''
-    Auxiliary binary classifier for Learning with Subset Selection (LESS)
+    Auxiliary binary classifier for Learning with Subset Stacking (LESS)
     '''
 
     def __init__(self, frac=None, n_neighbors=None, n_subsets=None,
@@ -796,7 +796,7 @@ class _LESSBC(_LESS, ClassifierMixin):
 
 class LESSClassifier(_LESS, ClassifierMixin):
     '''
-    Classifier for Learning with Subset Selection (LESS)
+    Classifier for Learning with Subset Stacking (LESS)
 
     This is a wrapper that calls the multiclass strategies, like one-vs-rest, 
     by using an auxiliary binary classifer for LESS (_LBC)
@@ -959,7 +959,7 @@ class LESSClassifier(_LESS, ClassifierMixin):
 
 class LESSRegressor(_LESS, RegressorMixin):
     '''
-    Regressor for Learning with Subset Selection (LESS)
+    Regressor for Learning with Subset Stacking (LESS)
 
     Parameters
     ----------
