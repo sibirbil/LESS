@@ -72,6 +72,14 @@ X_train = SC.fit_transform(X_train)
 X_test = SC.transform(X_test)
 ```
 
+## Parallel Version (Python)
+
+An `openmpi` implementation of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
+
+## R Version
+
+R implementation of LESS is available in [another repository](https://github.com/sibirbil/LESS-R).
+
 ## Citation
 Our software can be cited as:
 ````
@@ -82,10 +90,6 @@ Our software can be cited as:
     url = "https://github.com/sibirbil/LESS/"
   }
 ````
-
-## Parallel Version
-
-An `openmpi` implementation of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
 
 ## Changes in v.0.2.0
 
