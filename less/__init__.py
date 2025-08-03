@@ -1,4 +1,4 @@
-from .less import LESSRegressor
+from .less import LESSGBRegressor, LESSAVRegressor
 
-__all__ = ["LESSRegressor"]
+__all__ = ["LESSGBRegressor", "LESSAVRegressor"]
 __version__ = "0.4.0"
