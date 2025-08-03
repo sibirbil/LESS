@@ -532,7 +532,7 @@ class LESSAVRegressor(BaseLESSRegressor):
     def __init__(
         self,
         n_subsets: int = 20,
-        n_iterations: int = 10,
+        n_iterations: int = 100,
         local_estimator: Union[str, Callable] = "linear",
         global_estimator: Optional[Callable] = None,
         kernel_coeff: float = 0.1,
