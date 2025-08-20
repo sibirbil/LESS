@@ -29,9 +29,11 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         - 'tree': Decision tree with controlled complexity
         - callable: Custom estimator factory function
 
-    global_estimator : callable, default=None
-        Global meta-estimator factory function. If None, uses XGBRFRegressor.
-        Must return a fitted estimator with predict() method.
+    global_estimator : str or callable, default='xgboost'
+        Global meta-estimator factory function.
+        - 'xgboost': XGBRFRegressor
+        - None: Simple sum of weighted local predictions
+        - callable: Custom estimator factory function
 
     kernel_coeff : float, default=0.1
         RBF kernel coefficient for distance weighting. Must be positive.
@@ -50,7 +52,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         self,
         n_subsets: int = 20,
         local_estimator: Union[str, Callable] = "linear",
-        global_estimator: Optional[Callable] = None,
+        global_estimator: Union[str, Callable, None] = "xgboost",
         kernel_coeff: float = 0.1,
         min_neighbors: int = 10,
         random_state: Optional[int] = None,
@@ -81,13 +83,18 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         else:
             raise ValueError(f"Invalid local_estimator: {self.local_estimator}")
 
-    def _get_global_estimator_factory(self) -> Callable:
+    def _get_global_estimator_factory(self) -> Optional[Callable]:
         """Get global estimator factory function."""
-        if self.global_estimator is None:
+        if self.global_estimator == "xgboost":
             return lambda: XGBRFRegressor(
                 n_estimators=25, random_state=self._rng.randint(2**31), verbosity=0
             )
-        return self.global_estimator
+        elif self.global_estimator is None:
+            return None
+        elif callable(self.global_estimator):
+            return self.global_estimator
+        else:
+            raise ValueError(f"Invalid global_estimator: {self.global_estimator}")
 
     def _validate_and_adjust_params(self, n_samples: int) -> None:
         """Validate and adjust parameters based on data size."""
@@ -334,7 +341,7 @@ class LESSGBRegressor(BaseLESSRegressor):
         n_estimators: int = 100,
         learning_rate: float = 0.1,
         local_estimator: Union[str, Callable] = "linear",
-        global_estimator: Optional[Callable] = None,
+        global_estimator: Union[str, Callable, None] = "xgboost",
         kernel_coeff: float = 0.1,
         min_neighbors: int = 10,
         early_stopping_tolerance: float = 1e-8,
@@ -369,29 +376,36 @@ class LESSGBRegressor(BaseLESSRegressor):
         # Create weighted features for global model
         Z = distances * predictions
 
-        # Train global estimator
-        try:
-            global_est = self._global_estimator_factory()
-            global_est.fit(Z, residuals)
-        except Exception as e:
-            raise RuntimeError(f"Error training global model: {str(e)}") from e
+        # Train global estimator if available
+        global_est = None
+        if self._global_estimator_factory is not None:
+            try:
+                global_est = self._global_estimator_factory()
+                global_est.fit(Z, residuals)
+            except Exception as e:
+                raise RuntimeError(f"Error training global model: {str(e)}") from e
 
         return local_models, global_est
 
     def _predict_stage(
-        self, X: np.ndarray, local_models: list, global_model: Any
+        self, X: np.ndarray, local_models: list, global_model: Optional[Any]
     ) -> np.ndarray:
         """Make predictions for one boosting stage."""
         # Get local predictions and distances
         local_preds, distances = self._predict_with_models(X, local_models)
 
-        # Create features and predict with global model
+        # Create features
         Z = distances * local_preds
 
-        try:
-            return global_model.predict(Z)
-        except Exception as e:
-            raise RuntimeError(f"Error predicting with global model: {str(e)}") from e
+        # Predict based on whether global model exists
+        if global_model is not None:
+            try:
+                return global_model.predict(Z)
+            except Exception as e:
+                raise RuntimeError(f"Error predicting with global model: {str(e)}") from e
+        else:
+            # Simple sum of weighted predictions
+            return np.sum(Z, axis=1)
 
     def fit(self, X, y, sample_weight=None):
         """Fit the LESSGB regressor using gradient boosting."""
@@ -534,7 +548,7 @@ class LESSAVRegressor(BaseLESSRegressor):
         n_subsets: int = 20,
         n_iterations: int = 100,
         local_estimator: Union[str, Callable] = "linear",
-        global_estimator: Optional[Callable] = None,
+        global_estimator: Union[str, Callable, None] = "xgboost",
         kernel_coeff: float = 0.1,
         min_neighbors: int = 10,
         random_state: Optional[int] = None,
@@ -590,9 +604,11 @@ class LESSAVRegressor(BaseLESSRegressor):
                 # Create weighted features for global model
                 Z = distances * predictions
 
-                # Train global estimator
-                global_est = self._global_estimator_factory()
-                global_est.fit(Z, y)
+                # Train global estimator if available
+                global_est = None
+                if self._global_estimator_factory is not None:
+                    global_est = self._global_estimator_factory()
+                    global_est.fit(Z, y)
 
                 # Store models for this iteration
                 self._local_models_iterations.append(local_models)
@@ -640,9 +656,15 @@ class LESSAVRegressor(BaseLESSRegressor):
                 # Get local predictions and distances
                 local_preds, distances = self._predict_with_models(X, local_models)
 
-                # Create features and predict with global model
+                # Create features
                 Z = distances * local_preds
-                iteration_predictions = global_model.predict(Z)
+                
+                # Predict based on whether global model exists
+                if global_model is not None:
+                    iteration_predictions = global_model.predict(Z)
+                else:
+                    # Simple sum of weighted predictions
+                    iteration_predictions = np.sum(Z, axis=1)
 
                 # Validate predictions
                 if np.all(np.isfinite(iteration_predictions)):
