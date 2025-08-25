@@ -1,94 +1,60 @@
-#!/usr/bin/env python3
-"""
-Test script for LESS Regressor and Classifier
-"""
-
 import numpy as np
-from sklearn.datasets import make_regression, make_classification
+from sklearn.datasets import make_regression
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, accuracy_score
-from less import LESSRegressor, LESSClassifier
+from sklearn.metrics import mean_squared_error
+from less import LESSGBRegressor, LESSAVRegressor
 
-def test_regressor():
-    """Test LESSRegressor"""
-    print("Testing LESSRegressor...")
-    
-    # Generate synthetic regression data
-    X, y = make_regression(n_samples=1000, n_features=10, noise=0.1, random_state=42)
+def run_tests():
+    """Runs a series of tests for the LESS regressors."""
+    print('--- Generating Synthetic Regression Data ---')
+    X, y = make_regression(n_samples=10000, n_features=15, noise=0.2, random_state=42)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Test different local estimators
-    estimators = ["linear", "ridge", "tree"]
-    
-    for est_type in estimators:
-        print(f"\nTesting with local_estimator='{est_type}'")
-        
-        # Create and fit model
-        model = LESSRegressor(
-            n_subsets=10,
-            n_estimators=50,
-            learning_rate=0.1,
-            local_estimator=est_type,
-            random_state=42
-        )
-        
-        model.fit(X_train, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test)
-        
-        # Calculate metrics
-        mse = mean_squared_error(y_test, y_pred)
-        print(f"MSE: {mse:.4f}")
-        
-        # Test with n_rounds parameter
-        y_pred_limited = model.predict(X_test, n_rounds=25)
-        mse_limited = mean_squared_error(y_test, y_pred_limited)
-        print(f"MSE (25 rounds): {mse_limited:.4f}")
+    print('Data generated successfully.')
+    print(f'Train set size: {X_train.shape}')
+    print(f'Test set size: {X_test.shape}')
 
-def test_classifier():
-    """Test LESSClassifier"""
-    print("\n" + "="*50)
-    print("Testing LESSClassifier...")
-    
-    # Generate synthetic classification data
-    X, y = make_classification(n_samples=1000, n_features=10, n_classes=2, 
-                              n_informative=8, random_state=42)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Test different local estimators
-    estimators = ["logistic", "tree"]
-    
-    for est_type in estimators:
-        print(f"\nTesting with local_estimator='{est_type}'")
-        
-        # Create and fit model
-        model = LESSClassifier(
-            n_subsets=10,
-            n_estimators=50,
-            learning_rate=0.1,
-            local_estimator=est_type,
-            random_state=42
-        )
-        
-        model.fit(X_train, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test)
-        y_proba = model.predict_proba(X_test)
-        
-        # Calculate metrics
-        accuracy = accuracy_score(y_test, y_pred)
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"Probability shape: {y_proba.shape}")
-        print(f"Probability range: [{y_proba.min():.4f}, {y_proba.max():.4f}]")
-        
-        # Test with n_rounds parameter
-        y_pred_limited = model.predict(X_test, n_rounds=25)
-        accuracy_limited = accuracy_score(y_test, y_pred_limited)
-        print(f"Accuracy (25 rounds): {accuracy_limited:.4f}")
+    models_to_test = {
+        'LESSGBRegressor': LESSGBRegressor,
+        'LESSAVRegressor': LESSAVRegressor
+    }
 
-if __name__ == "__main__":
-    test_regressor()
-    test_classifier()
-    print("\nAll tests completed!") 
+    for model_name, model_class in models_to_test.items():
+        print(f'\n--- Testing {model_name} ---')
+
+        # Test 1: Default parameters (cluster_method='tree')
+        try:
+            print('\n1. Testing with default parameters (cluster_method=\'tree\')...')
+            model_default = model_class(random_state=42)
+            model_default.fit(X_train, y_train)
+            predictions_default = model_default.predict(X_test)
+            mse_default = mean_squared_error(y_test, predictions_default)
+            print(f'  -> SUCCESS: Model trained and predicted. MSE: {mse_default:.4f}')
+        except Exception as e:
+            print(f'  -> FAILED: An error occurred: {e}')
+
+        # Test 2: KMeans clustering
+        try:
+            print("\n2. Testing with cluster_method='kmeans'...")
+            model_kmeans = model_class(cluster_method='kmeans', n_subsets=10, random_state=42)
+            model_kmeans.fit(X_train, y_train)
+            predictions_kmeans = model_kmeans.predict(X_test)
+            mse_kmeans = mean_squared_error(y_test, predictions_kmeans)
+            print(f'  -> SUCCESS: Model trained and predicted. MSE: {mse_kmeans:.4f}')
+        except Exception as e:
+            print(f'  -> FAILED: An error occurred: {e}')
+
+        # Test 3: Train/validation split with val_size
+        try:
+            print('\n3. Testing with validation set (val_size=0.5)...')
+            model_val = model_class(val_size=0.5, n_subsets=10, random_state=42)
+            model_val.fit(X_train, y_train)
+            predictions_val = model_val.predict(X_test)
+            mse_val = mean_squared_error(y_test, predictions_val)
+            print(f'  -> SUCCESS: Model trained and predicted. MSE: {mse_val:.4f}')
+        except Exception as e:
+            print(f'  -> FAILED: An error occurred: {e}')
+
+    print('\n--- All Tests Completed ---')
+
+if __name__ == '__main__':
+    run_tests()

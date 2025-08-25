@@ -1,17 +1,24 @@
 import warnings
 from typing import Optional, Callable, Union, Any
 import numpy as np
-from ._utils import LocalModel, rbf_kernel
+from ._utils import (
+    LocalModel,
+    rbf_kernel,
+    _validate_static_hyperparameters,
+    _adjust_dynamic_parameters,
+)
 from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.neighbors import KDTree
 from sklearn.linear_model import LinearRegression
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.model_selection import train_test_split
 from xgboost import XGBRFRegressor
 
 
 class BaseLESSRegressor(BaseEstimator, RegressorMixin):
-    """
+    r"""
     Base class for LESS (Learning with Subset Selection) Regressors.
 
     This base class provides common functionality for both gradient boosting
@@ -22,53 +29,68 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     n_subsets : int, default=20
         Number of local subsets to create for training. Must be positive.
         Each subset focuses on a different region of the feature space.
-
     local_estimator : str or callable, default='linear'
-        Local estimator type or factory function.
-        - 'linear': Linear regression
-        - 'tree': Decision tree with controlled complexity
-        - callable: Custom estimator factory function
-
-    global_estimator : str or callable, default='xgboost'
-        Global meta-estimator factory function.
-        - 'xgboost': XGBRFRegressor
-        - None: Simple sum of weighted local predictions
-        - callable: Custom estimator factory function
-
+        The local estimator used to model each data subset. Can be a string
+        identifying a built-in model ('linear', 'tree') or a callable that
+        returns a scikit-learn compatible regressor instance.
+    global_estimator : str or callable or None, default='xgboost'
+        The global meta-estimator that combines the predictions of local models.
+        Can be a string ('xgboost'), None (for simple averaging), or a
+        callable that returns a scikit-learn compatible regressor.
+    cluster_method : str or callable, default='tree'
+        The method for selecting subset centers. 'tree' uses random sampling,
+        while 'kmeans' and 'spectral' use clustering. A callable can be
+        provided for custom clustering.
+    val_size : float, optional
+        The proportion of the dataset to reserve for training the global
+        estimator. If specified, the data is split into a local learning set
+        and a global learning set. Must be between 0 and 1.
     kernel_coeff : float, default=0.1
-        RBF kernel coefficient for distance weighting. Must be positive.
-        Lower values create more localized influence.
-
+        The coefficient for the RBF kernel used to calculate distance-based
+        weights. Higher values lead to more localized influence.
     min_neighbors : int, default=10
-        Minimum number of neighbors per subset. Must be positive.
-        Ensures each local model has sufficient training data.
+        The minimum number of neighbors for each local subset. This ensures
+        that each local model is trained on a sufficient number of samples.
+    random_state : int or np.random.RandomState, optional
+        Controls the randomness for reproducibility. Can be an integer for
+        a new RandomState, or an existing RandomState object.
 
-    random_state : int, RandomState instance or None, default=None
-        Controls randomness of subset selection and estimator initialization.
-        Pass int for reproducible output across multiple function calls.
+    Attributes
+    ----------
+    n_features_in_ : int
+        The number of features seen during :meth:`fit`.
+    feature_names_in_ : np.ndarray of shape (`n_features_in_`,)
+        Names of features seen during :meth:`fit`. Defined only when `X`
+        has feature names that are all strings.
     """
 
     def __init__(
         self,
         n_subsets: int = 20,
-        local_estimator: Union[str, Callable] = "linear",
-        global_estimator: Union[str, Callable, None] = "xgboost",
+        local_estimator: Union[str, Callable[[], Any]] = "linear",
+        global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
+        cluster_method: Union[str, Callable[..., Any]] = "tree",
+        val_size: Optional[float] = None,
         kernel_coeff: float = 0.1,
         min_neighbors: int = 10,
-        random_state: Optional[int] = None,
+        random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
         self.n_subsets = n_subsets
         self.local_estimator = local_estimator
         self.global_estimator = global_estimator
+        self.cluster_method = cluster_method
+        self.val_size = val_size
         self.kernel_coeff = kernel_coeff
         self.min_neighbors = min_neighbors
         self.random_state = random_state
 
-        # Initialize random generator
-        self._rng = np.random.RandomState(random_state)
+        _validate_static_hyperparameters(self)
 
-    def _get_local_estimator_factory(self) -> Callable:
-        """Get local estimator factory function with validation."""
+        # Initialize random generator
+        self._rng = np.random.RandomState(self.random_state)
+
+    def _get_local_estimator_factory(self) -> Callable[[], Any]:
+        """Get the factory function for creating local estimator instances."""
         if self.local_estimator == "linear":
             return lambda: LinearRegression()
         elif self.local_estimator == "tree":
@@ -83,8 +105,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         else:
             raise ValueError(f"Invalid local_estimator: {self.local_estimator}")
 
-    def _get_global_estimator_factory(self) -> Optional[Callable]:
-        """Get global estimator factory function."""
+    def _get_global_estimator_factory(self) -> Optional[Callable[[], Any]]:
+        """Get the factory function for creating the global estimator instance."""
         if self.global_estimator == "xgboost":
             return lambda: XGBRFRegressor(
                 n_estimators=25, random_state=self._rng.randint(2**31), verbosity=0
@@ -96,47 +118,23 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         else:
             raise ValueError(f"Invalid global_estimator: {self.global_estimator}")
 
-    def _validate_and_adjust_params(self, n_samples: int) -> None:
-        """Validate and adjust parameters based on data size."""
-        # Adjust n_subsets if larger than sample size
-        if self.n_subsets > n_samples:
-            warnings.warn(
-                f"n_subsets ({self.n_subsets}) is larger than n_samples ({n_samples}). "
-                f"Setting n_subsets to {n_samples}.",
-                UserWarning,
-            )
-            self._n_subsets_adjusted = n_samples
-        else:
-            self._n_subsets_adjusted = self.n_subsets
-
-        # Calculate optimal number of neighbors
-        suggested_neighbors = max(
-            self.min_neighbors, n_samples // self._n_subsets_adjusted
-        )
-        self._n_neighbors = min(suggested_neighbors, n_samples)
-
-        # Warn if neighbors are too few
-        if self._n_neighbors < self.min_neighbors:
-            warnings.warn(
-                f"Each subset will have only {self._n_neighbors} neighbors, "
-                f"which is less than min_neighbors ({self.min_neighbors}). "
-                "Consider reducing n_subsets or increasing sample size.",
-                UserWarning,
-            )
-
     def _safe_normalize_distances(self, distances: np.ndarray) -> np.ndarray:
-        """
+        r"""
         Safely normalize distance weights to avoid numerical instabilities.
+
+        The method normalizes the distances so that each row sums to 1. It handles
+        cases where the sum of distances in a row is close to zero by
+        assigning a uniform weight to prevent division by zero.
 
         Parameters
         ----------
         distances : np.ndarray of shape (n_samples, n_subsets)
-            Raw distance weights from RBF kernel
+            The raw distance weights calculated from the RBF kernel.
 
         Returns
         -------
         np.ndarray of shape (n_samples, n_subsets)
-            Normalized distance weights that sum to 1 for each sample
+            The normalized distance weights, where each row sums to 1.
         """
         if distances.shape[0] == 0:
             return distances
@@ -169,32 +167,98 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
         return normalized
 
-    def _build_local_models(self, X: np.ndarray, y: np.ndarray, tree: KDTree) -> tuple:
-        """
-        Build local models for one stage/iteration.
+    def _get_cluster_centers(self, X: np.ndarray) -> np.ndarray:
+        r"""
+        Select subset centers using the specified clustering method.
 
         Parameters
         ----------
         X : np.ndarray
-            Training features
-        y : np.ndarray
-            Target values (or residuals for boosting)
-        tree : KDTree
-            KDTree for efficient neighbor search
+            The input data from which to select centers.
 
         Returns
         -------
-        tuple of (local_models, predictions, distances)
+        np.ndarray
+            The coordinates of the selected subset centers.
+
+        Raises
+        ------
+        ValueError
+            If `cluster_method` is not a recognized string or a callable.
+        RuntimeError
+            If the clustering process fails.
+        """
+        if self.cluster_method == "tree":
+            # Randomly select subset centers
+            center_indices = self._rng.choice(
+                X.shape[0], size=self._n_subsets_adjusted, replace=False
+            )
+            return X[center_indices]
+        elif callable(self.cluster_method):
+            # Use custom clustering method
+            clusterer = self.cluster_method(n_clusters=self._n_subsets_adjusted)
+            clusterer.fit(X)
+            return clusterer.cluster_centers_
+        elif isinstance(self.cluster_method, str):
+            # Use sklearn clustering
+            try:
+                if self.cluster_method == "kmeans":
+                    # Use a new random seed for each call to ensure diversity across iterations
+                    clusterer = KMeans(
+                        n_clusters=self._n_subsets_adjusted,
+                        random_state=self._rng.randint(2**31),
+                    )
+                elif self.cluster_method == "spectral":
+                    clusterer = SpectralClustering(
+                        n_clusters=self._n_subsets_adjusted, random_state=self._rng
+                    )
+                else:
+                    raise ValueError(f"Invalid cluster_method: {self.cluster_method}")
+
+                clusterer.fit(X)
+                return clusterer.cluster_centers_
+            except Exception as e:
+                raise RuntimeError(f"Error during clustering: {str(e)}") from e
+        else:
+            raise ValueError(f"Invalid cluster_method: {self.cluster_method}")
+
+    def _build_local_models(
+        self, X: np.ndarray, y: np.ndarray
+    ) -> tuple[list[LocalModel], np.ndarray, np.ndarray]:
+        r"""
+        Build local models for one stage of the algorithm.
+
+        This method selects subset centers, finds their nearest neighbors, and
+        trains a local estimator for each subset.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            The training features.
+        y : np.ndarray
+            The target values or residuals for boosting.
+
+        Returns
+        -------
+        tuple[list[LocalModel], np.ndarray, np.ndarray]
+            A tuple containing:
+            - A list of trained `LocalModel` instances.
+            - An array of predictions from each local model on `X`.
+            - An array of distance-based weights for each sample to each subset.
         """
         n_samples = X.shape[0]
 
-        # Randomly select subset centers
-        center_indices = self._rng.choice(
-            n_samples, size=self._n_subsets_adjusted, replace=False
-        )
+        # Get cluster centers
+        centers = self._get_cluster_centers(X)
+
+        # Build KDTree for efficient neighbor search
+        try:
+            tree = KDTree(X)
+        except Exception as e:
+            raise ValueError(f"Error building KDTree: {str(e)}") from e
 
         # Find neighbors for each center
-        _, neighbor_indices = tree.query(X[center_indices], k=self._n_neighbors)
+        _, neighbor_indices = tree.query(centers, k=self._n_neighbors)
 
         local_models = []
         predictions = np.zeros((n_samples, self._n_subsets_adjusted))
@@ -228,20 +292,25 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
         return local_models, predictions, distances
 
-    def _predict_with_models(self, X: np.ndarray, local_models: list) -> np.ndarray:
-        """
-        Make predictions using trained local models.
+    def _predict_with_models(
+        self, X: np.ndarray, local_models: list[LocalModel]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        r"""
+        Generate predictions from a list of trained local models.
 
         Parameters
         ----------
         X : np.ndarray
-            Input features
-        local_models : list
-            List of LocalModel instances
+            The input features for which to generate predictions.
+        local_models : list[LocalModel]
+            A list of trained `LocalModel` instances.
 
         Returns
         -------
-        tuple of (predictions, distances)
+        tuple[np.ndarray, np.ndarray]
+            A tuple containing:
+            - An array of predictions from each local model.
+            - An array of distance-based weights.
         """
         n_samples = X.shape[0]
 
@@ -263,8 +332,69 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
         return local_preds, distances
 
-    def _validate_input_data(self, X, y, sample_weight=None):
-        """Common input validation for both variants."""
+    def _store_sklearn_attributes(self, X: np.ndarray) -> None:
+        r"""
+        Store attributes required by scikit-learn.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            The input data from which to infer attributes.
+        """
+        _, n_features = X.shape
+        self.n_features_in_ = n_features
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.array(X.columns, dtype=object)
+
+    def _validate_prediction_input(self, X: np.ndarray) -> np.ndarray:
+        r"""
+        Validate the input data for prediction.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            The input features for prediction.
+
+        Returns
+        -------
+        np.ndarray
+            The validated and converted `X` array.
+        """
+        # Check if fitted
+        check_is_fitted(self)
+
+        # Validate input
+        X = check_array(X, accept_sparse=False, dtype=np.float64)
+
+        # Check feature count consistency
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but regressor "
+                f"is expecting {self.n_features_in_} features as seen in fit."
+            )
+
+        return X
+
+    def _prepare_fit(
+        self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        r"""
+        Prepare for fitting by validating data and setting up estimators.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            The input features.
+        y : np.ndarray
+            The target values.
+        sample_weight : np.ndarray, optional
+            Sample weights.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            A tuple containing the validated X and y.
+        """
         # Validate and prepare data
         X, y = check_X_y(
             X,
@@ -281,31 +411,22 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 UserWarning,
             )
 
+        self._store_sklearn_attributes(X)
+
+        if self.val_size is not None:
+            if not (0 < self.val_size < 1):
+                raise ValueError("val_size must be a float between 0 and 1.")
+
+        # Validate and adjust parameters based on training data
+        self._n_subsets_adjusted, self._n_neighbors = _adjust_dynamic_parameters(
+            self, X.shape[0]
+        )
+
+        # Initialize estimator factories
+        self._local_estimator_factory = self._get_local_estimator_factory()
+        self._global_estimator_factory = self._get_global_estimator_factory()
+
         return X, y
-
-    def _store_sklearn_attributes(self, X):
-        """Store sklearn-required attributes."""
-        n_samples, n_features = X.shape
-        self.n_features_in_ = n_features
-        if hasattr(X, "columns"):
-            self.feature_names_in_ = np.array(X.columns, dtype=object)
-
-    def _validate_prediction_input(self, X):
-        """Common prediction input validation."""
-        # Check if fitted
-        check_is_fitted(self)
-
-        # Validate input
-        X = check_array(X, accept_sparse=False, dtype=np.float64)
-
-        # Check feature count consistency
-        if X.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"X has {X.shape[1]} features, but regressor "
-                f"is expecting {self.n_features_in_} features as seen in fit."
-            )
-
-        return X
 
     def fit(self, X, y, sample_weight=None):
         """Abstract method to be implemented by subclasses."""
@@ -317,22 +438,50 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
 
 class LESSGBRegressor(BaseLESSRegressor):
-    """
+    r"""
     LESSGB (Learning with Subset Selection Gradient Boosting) Regressor.
 
-    Additional Parameters
-    ---------------------
+    This regressor implements the gradient boosting variant of the LESS algorithm.
+    It iteratively fits stages, where each stage consists of a set of local
+    models that predict the residuals of the previous stage.
+
+    Parameters
+    ----------
+    n_subsets : int, default=20
+        Number of local subsets to create for training.
     n_estimators : int, default=100
-        Number of boosting iterations. Must be positive.
-        More iterations may improve accuracy but increase computation time.
-
+        The number of boosting stages to perform.
     learning_rate : float, default=0.1
-        Learning rate for gradient boosting. Must be in (0, 1].
-        Lower values require more estimators but may provide better generalization.
-
+        The learning rate shrinks the contribution of each stage.
+    local_estimator : str or callable, default='linear'
+        The local estimator for modeling data subsets.
+    global_estimator : str or callable or None, default='xgboost'
+        The global meta-estimator for combining local model predictions.
+    cluster_method : str or callable, default='tree'
+        The method for selecting subset centers.
+    val_size : float, optional
+        The proportion of the dataset to reserve for the global estimator.
+    kernel_coeff : float, default=0.1
+        The RBF kernel coefficient for distance weighting.
+    min_neighbors : int, default=10
+        The minimum number of neighbors for each local subset.
     early_stopping_tolerance : float, default=1e-8
         Tolerance for early stopping based on residual improvement.
-        Training stops if mean absolute residual falls below this threshold.
+    random_state : int or np.random.RandomState, optional
+        Controls the randomness for reproducibility.
+
+    Attributes
+    ----------
+    n_features_in_ : int
+        The number of features seen during :meth:`fit`.
+    feature_names_in_ : np.ndarray of shape (`n_features_in_`,)
+        Names of features seen during :meth:`fit`.
+    _local_models_stages : list[list[LocalModel]]
+        A list containing the lists of local models for each boosting stage.
+    _global_models_stages : list[Any]
+        A list containing the global model for each boosting stage.
+    _base_prediction : float
+        The initial base prediction, typically the mean of the target values.
     """
 
     def __init__(
@@ -340,17 +489,21 @@ class LESSGBRegressor(BaseLESSRegressor):
         n_subsets: int = 20,
         n_estimators: int = 100,
         learning_rate: float = 0.1,
-        local_estimator: Union[str, Callable] = "linear",
-        global_estimator: Union[str, Callable, None] = "xgboost",
+        local_estimator: Union[str, Callable[[], Any]] = "linear",
+        global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
+        cluster_method: Union[str, Callable[..., Any]] = "tree",
+        val_size: Optional[float] = None,
         kernel_coeff: float = 0.1,
         min_neighbors: int = 10,
         early_stopping_tolerance: float = 1e-8,
-        random_state: Optional[int] = None,
+        random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
         super().__init__(
             n_subsets=n_subsets,
             local_estimator=local_estimator,
             global_estimator=global_estimator,
+            cluster_method=cluster_method,
+            val_size=val_size,
             kernel_coeff=kernel_coeff,
             min_neighbors=min_neighbors,
             random_state=random_state,
@@ -361,94 +514,147 @@ class LESSGBRegressor(BaseLESSRegressor):
         self.early_stopping_tolerance = early_stopping_tolerance
 
     def _reset_state(self) -> None:
-        """Reset internal state for refitting."""
+        """Reset the internal state of the regressor for refitting."""
         self._local_models_stages = []
         self._global_models_stages = []
-        self._base_prediction = None
+        self._base_prediction = 0.0
 
-    def _build_stage(self, X: np.ndarray, residuals: np.ndarray, tree: KDTree) -> tuple:
-        """Build one boosting stage with local and global models."""
-        # Build local models
-        local_models, predictions, distances = self._build_local_models(
-            X, residuals, tree
-        )
+    def _build_stage(
+        self,
+        local_models: list[LocalModel],
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: Optional[np.ndarray],
+        y_val: Optional[np.ndarray],
+    ) -> Optional[Any]:
+        r"""
+        Build the global model for a single boosting stage.
 
-        # Create weighted features for global model
-        Z = distances * predictions
+        Parameters
+        ----------
+        local_models : list[LocalModel]
+            The trained local models for the current stage.
+        X_train : np.ndarray
+            The training features.
+        y_train : np.ndarray
+            The training targets (residuals).
+        X_val : np.ndarray, optional
+            The validation features.
+        y_val : np.ndarray, optional
+            The validation targets (residuals).
 
-        # Train global estimator if available
+        Returns
+        -------
+        Optional[Any]
+            The trained global model for the stage, or None.
+        """
         global_est = None
         if self._global_estimator_factory is not None:
+            # If validation set exists, train global model on its predictions
+            if X_val is not None and y_val is not None:
+                local_preds, distances = self._predict_with_models(X_val, local_models)
+                Z_global = distances * local_preds
+                y_global = y_val
+            # Otherwise, train global model on the training set predictions
+            else:
+                local_preds, distances = self._predict_with_models(
+                    X_train, local_models
+                )
+                Z_global = distances * local_preds
+                y_global = y_train
+
             try:
                 global_est = self._global_estimator_factory()
-                global_est.fit(Z, residuals)
+                global_est.fit(Z_global, y_global)
             except Exception as e:
                 raise RuntimeError(f"Error training global model: {str(e)}") from e
 
-        return local_models, global_est
+        return global_est
 
     def _predict_stage(
-        self, X: np.ndarray, local_models: list, global_model: Optional[Any]
+        self, X: np.ndarray, local_models: list[LocalModel], global_model: Optional[Any]
     ) -> np.ndarray:
-        """Make predictions for one boosting stage."""
-        # Get local predictions and distances
-        local_preds, distances = self._predict_with_models(X, local_models)
+        r"""
+        Make predictions for a single boosting stage.
 
-        # Create features
+        Parameters
+        ----------
+        X : np.ndarray
+            The input features.
+        local_models : list[LocalModel]
+            The local models for the stage.
+        global_model : any, optional
+            The global model for the stage.
+
+        Returns
+        -------
+        np.ndarray
+            The predictions for the stage.
+        """
+        local_preds, distances = self._predict_with_models(X, local_models)
         Z = distances * local_preds
 
-        # Predict based on whether global model exists
         if global_model is not None:
             try:
                 return global_model.predict(Z)
             except Exception as e:
-                raise RuntimeError(f"Error predicting with global model: {str(e)}") from e
+                raise RuntimeError(
+                    f"Error predicting with global model: {str(e)}"
+                ) from e
         else:
-            # Simple sum of weighted predictions
             return np.sum(Z, axis=1)
 
-    def fit(self, X, y, sample_weight=None):
-        """Fit the LESSGB regressor using gradient boosting."""
-        # Reset state for refitting
+    def fit(
+        self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
+    ) -> "LESSGBRegressor":
+        r"""
+        Fit the LESSGB regressor using gradient boosting.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_samples, n_features)
+            The training input samples.
+        y : np.ndarray of shape (n_samples,)
+            The target values.
+        sample_weight : np.ndarray of shape (n_samples,), optional
+            Sample weights. Not currently used.
+
+        Returns
+        -------
+        LESSGBRegressor
+            The fitted regressor.
+        """
         self._reset_state()
+        X, y = self._prepare_fit(X, y, sample_weight)
 
-        # Validate input
-        X, y = self._validate_input_data(X, y, sample_weight)
-        self._store_sklearn_attributes(X)
-
-        n_samples = X.shape[0]
-
-        # Validate and adjust parameters based on data
-        self._validate_and_adjust_params(n_samples)
-
-        # Initialize estimator factories
-        self._local_estimator_factory = self._get_local_estimator_factory()
-        self._global_estimator_factory = self._get_global_estimator_factory()
-
-        # Build KDTree for efficient neighbor search
-        try:
-            tree = KDTree(X)
-        except Exception as e:
-            raise ValueError(f"Error building KDTree: {str(e)}") from e
-
-        # Initialize predictions
         self._base_prediction = np.mean(y)
         if not np.isfinite(self._base_prediction):
             raise ValueError("Target values contain non-finite values")
 
-        current_predictions = np.full(n_samples, self._base_prediction)
-        residuals = y - current_predictions
+        current_predictions = np.full(y.shape, self._base_prediction)
 
-        # Boosting iterations
         for stage in range(self.n_estimators):
             try:
-                # Build stage to predict residuals
-                local_models, global_model = self._build_stage(X, residuals, tree)
+                residuals = y - current_predictions
 
-                # Get stage predictions
+                if self.val_size is not None:
+                    X_train, X_val, residuals_train, residuals_val = train_test_split(
+                        X, residuals, test_size=self.val_size, random_state=self._rng
+                    )
+                else:
+                    X_train, residuals_train = X, residuals
+                    X_val, residuals_val = None, None
+
+                local_models, _, _ = self._build_local_models(
+                    X_train, residuals_train
+                )
+
+                global_model = self._build_stage(
+                    local_models, X_train, residuals_train, X_val, residuals_val
+                )
+
                 stage_predictions = self._predict_stage(X, local_models, global_model)
 
-                # Validate predictions
                 if not np.all(np.isfinite(stage_predictions)):
                     warnings.warn(
                         f"Non-finite predictions in stage {stage}, skipping",
@@ -456,36 +662,45 @@ class LESSGBRegressor(BaseLESSRegressor):
                     )
                     continue
 
-                # Update predictions with learning rate
                 current_predictions += self.learning_rate * stage_predictions
-                residuals = y - current_predictions
 
-                # Store stage models
                 self._local_models_stages.append(local_models)
                 self._global_models_stages.append(global_model)
 
-                # Early stopping check
-                mean_abs_residual = np.mean(np.abs(residuals))
-                if mean_abs_residual < self.early_stopping_tolerance:
-                    if stage > 0:  # Only stop if we've made some progress
-                        break
+                mean_abs_residual = np.mean(np.abs(y - current_predictions))
+                if mean_abs_residual < self.early_stopping_tolerance and stage > 0:
+                    break
 
             except Exception as e:
                 warnings.warn(f"Error in boosting stage {stage}: {str(e)}", UserWarning)
-                # If no stages completed successfully, raise error
-                if len(self._local_models_stages) == 0:
+                if not self._local_models_stages:
                     raise RuntimeError(
                         "No boosting stages completed successfully"
                     ) from e
                 break
 
-        if len(self._local_models_stages) == 0:
+        if not self._local_models_stages:
             raise RuntimeError("No boosting stages completed successfully")
 
         return self
 
-    def predict(self, X, n_rounds: Optional[int] = None):
-        """Predict using the LESSGB regressor."""
+    def predict(self, X: np.ndarray, n_rounds: Optional[int] = None) -> np.ndarray:
+        r"""
+        Predict using the fitted LESSGB regressor.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_samples, n_features)
+            The input samples to predict.
+        n_rounds : int, optional
+            The number of boosting stages to use for prediction. If None, all
+            stages are used.
+
+        Returns
+        -------
+        np.ndarray of shape (n_samples,)
+            The predicted values.
+        """
         X = self._validate_prediction_input(X)
 
         n_samples = X.shape[0]
@@ -530,33 +745,64 @@ class LESSGBRegressor(BaseLESSRegressor):
 
 
 class LESSAVRegressor(BaseLESSRegressor):
-    """
+    r"""
     LESSAV (Learning with Subset Selection Averaging) Regressor.
 
-    This variant uses model averaging instead of gradient boosting.
-    Multiple sets of local models are trained and their predictions are averaged.
+    This regressor implements the averaging variant of the LESS algorithm.
+    It trains multiple iterations of local and global models and averages
+    their predictions.
 
-    Additional Parameters
-    ---------------------
-    n_iterations : int, default=10
-        Number of averaging iterations. Each iteration creates a new set of local models.
-        More iterations may improve stability and accuracy.
+    Parameters
+    ----------
+    n_subsets : int, default=20
+        Number of local subsets to create for training.
+    n_iterations : int, default=100
+        The number of averaging iterations to perform.
+    local_estimator : str or callable, default='linear'
+        The local estimator for modeling data subsets.
+    global_estimator : str or callable or None, default='xgboost'
+        The global meta-estimator for combining local model predictions.
+    cluster_method : str or callable, default='tree'
+        The method for selecting subset centers.
+    val_size : float, optional
+        The proportion of the dataset to reserve for the global estimator.
+    kernel_coeff : float, default=0.1
+        The RBF kernel coefficient for distance weighting.
+    min_neighbors : int, default=10
+        The minimum number of neighbors for each local subset.
+    random_state : int or np.random.RandomState, optional
+        Controls the randomness for reproducibility.
+
+    Attributes
+    ----------
+    n_features_in_ : int
+        The number of features seen during :meth:`fit`.
+    feature_names_in_ : np.ndarray of shape (`n_features_in_`,)
+        Names of features seen during :meth:`fit`.
+    _local_models_iterations : list[list[LocalModel]]
+        A list containing the lists of local models for each iteration.
+    _global_models_iterations : list[Any]
+        A list containing the global model for each iteration.
     """
 
     def __init__(
         self,
         n_subsets: int = 20,
         n_iterations: int = 100,
-        local_estimator: Union[str, Callable] = "linear",
-        global_estimator: Union[str, Callable, None] = "xgboost",
+        local_estimator: Union[str, Callable[[], Any]] = "linear",
+        global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
+        cluster_method: Union[str, Callable[..., Any]] = "tree",
+        val_size: Optional[float] = None,
         kernel_coeff: float = 0.1,
         min_neighbors: int = 10,
-        random_state: Optional[int] = None,
+        random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
         super().__init__(
             n_subsets=n_subsets,
             local_estimator=local_estimator,
             global_estimator=global_estimator,
+            cluster_method=cluster_method,
+            val_size=val_size,
             kernel_coeff=kernel_coeff,
             min_neighbors=min_neighbors,
             random_state=random_state,
@@ -565,69 +811,95 @@ class LESSAVRegressor(BaseLESSRegressor):
         self.n_iterations = n_iterations
 
     def _reset_state(self) -> None:
-        """Reset internal state for refitting."""
+        """Reset the internal state of the regressor for refitting."""
         self._local_models_iterations = []
         self._global_models_iterations = []
 
-    def fit(self, X, y, sample_weight=None):
-        """Fit the LESSAV regressor using model averaging."""
-        # Reset state for refitting
+    def fit(
+        self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
+    ) -> "LESSAVRegressor":
+        r"""
+        Fit the LESSAV regressor using model averaging.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_samples, n_features)
+            The training input samples.
+        y : np.ndarray of shape (n_samples,)
+            The target values.
+        sample_weight : np.ndarray of shape (n_samples,), optional
+            Sample weights. Not currently used.
+
+        Returns
+        -------
+        LESSAVRegressor
+            The fitted regressor.
+        """
         self._reset_state()
+        X, y = self._prepare_fit(X, y, sample_weight)
 
-        # Validate input
-        X, y = self._validate_input_data(X, y, sample_weight)
-        self._store_sklearn_attributes(X)
-
-        n_samples = X.shape[0]
-
-        # Validate and adjust parameters based on data
-        self._validate_and_adjust_params(n_samples)
-
-        # Initialize estimator factories
-        self._local_estimator_factory = self._get_local_estimator_factory()
-        self._global_estimator_factory = self._get_global_estimator_factory()
-
-        # Build KDTree for efficient neighbor search
-        try:
-            tree = KDTree(X)
-        except Exception as e:
-            raise ValueError(f"Error building KDTree: {str(e)}") from e
-
-        # Train multiple iterations of models
-        for iteration in range(self.n_iterations):
+        for _ in range(self.n_iterations):
             try:
-                # Build local models for this iteration
-                local_models, predictions, distances = self._build_local_models(
-                    X, y, tree
+                if self.val_size is not None:
+                    X_train, X_val, y_train, y_val = train_test_split(
+                        X, y, test_size=self.val_size, random_state=self._rng
+                    )
+                else:
+                    X_train, y_train = X, y
+                    X_val, y_val = None, None
+
+                local_models, train_preds, train_dists = self._build_local_models(
+                    X_train, y_train
                 )
 
-                # Create weighted features for global model
-                Z = distances * predictions
-
-                # Train global estimator if available
                 global_est = None
                 if self._global_estimator_factory is not None:
-                    global_est = self._global_estimator_factory()
-                    global_est.fit(Z, y)
+                    if X_val is not None and y_val is not None:
+                        val_preds, val_dists = self._predict_with_models(
+                            X_val, local_models
+                        )
+                        Z_global = val_dists * val_preds
+                        y_global = y_val
+                    else:
+                        Z_global = train_dists * train_preds
+                        y_global = y_train
 
-                # Store models for this iteration
+                    global_est = self._global_estimator_factory()
+                    global_est.fit(Z_global, y_global)
+
                 self._local_models_iterations.append(local_models)
                 self._global_models_iterations.append(global_est)
 
             except Exception as e:
-                warnings.warn(f"Error in iteration {iteration}: {str(e)}", UserWarning)
-                # If no iterations completed successfully, raise error
-                if len(self._local_models_iterations) == 0:
+                warnings.warn(f"Error in iteration: {str(e)}", UserWarning)
+                if not self._local_models_iterations:
                     raise RuntimeError("No iterations completed successfully") from e
                 continue
 
-        if len(self._local_models_iterations) == 0:
+        if not self._local_models_iterations:
             raise RuntimeError("No iterations completed successfully")
 
         return self
 
-    def predict(self, X, n_iterations: Optional[int] = None):
-        """Predict using the LESSAV regressor by averaging predictions from multiple iterations."""
+    def predict(self, X: np.ndarray, n_iterations: Optional[int] = None) -> np.ndarray:
+        r"""
+        Predict using the fitted LESSAV regressor.
+
+        This method averages the predictions of all trained iterations.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_samples, n_features)
+            The input samples to predict.
+        n_iterations : int, optional
+            The number of iterations to use for prediction. If None, all
+            available iterations are used.
+
+        Returns
+        -------
+        np.ndarray of shape (n_samples,)
+            The averaged predicted values.
+        """
         X = self._validate_prediction_input(X)
 
         n_samples = X.shape[0]
@@ -658,7 +930,7 @@ class LESSAVRegressor(BaseLESSRegressor):
 
                 # Create features
                 Z = distances * local_preds
-                
+
                 # Predict based on whether global model exists
                 if global_model is not None:
                     iteration_predictions = global_model.predict(Z)
