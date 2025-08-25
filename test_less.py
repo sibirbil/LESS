@@ -24,7 +24,7 @@ def run_tests():
         # Test 1: Default parameters (cluster_method='tree')
         try:
             print('\n1. Testing with default parameters (cluster_method=\'tree\')...')
-            model_default = model_class(random_state=42)
+            model_default = model_class(random_state=42, kernel_coeff=None)
             model_default.fit(X_train, y_train)
             predictions_default = model_default.predict(X_test)
             mse_default = mean_squared_error(y_test, predictions_default)

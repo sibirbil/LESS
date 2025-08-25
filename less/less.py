@@ -45,9 +45,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         The proportion of the dataset to reserve for training the global
         estimator. If specified, the data is split into a local learning set
         and a global learning set. Must be between 0 and 1.
-    kernel_coeff : float, default=0.1
-        The coefficient for the RBF kernel used to calculate distance-based
-        weights. Higher values lead to more localized influence.
+    kernel_coeff : float or None, default=0.1
+        The coefficient for the RBF kernel used to calculate distance-based weights.
+        If None, the coefficient is dynamically set to `1.0 / (n_subsets**2)`
+        for compatibility with the original LESS implementation. A larger `n_subsets`
+        will result in a smaller, more localized kernel.
+        If a float is provided, it is used as a fixed coefficient. Higher values
+        lead to more localized influence.
     min_neighbors : int, default=10
         The minimum number of neighbors for each local subset. This ensures
         that each local model is trained on a sufficient number of samples.
@@ -71,7 +75,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
         cluster_method: Union[str, Callable[..., Any]] = "tree",
         val_size: Optional[float] = None,
-        kernel_coeff: float = 0.1,
+        kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
@@ -264,6 +268,16 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         predictions = np.zeros((n_samples, self._n_subsets_adjusted))
         distances = np.zeros((n_samples, self._n_subsets_adjusted))
 
+        # Determine kernel coefficient
+        if self.kernel_coeff is None:
+            kernel_coeff = (
+                1.0 / (self._n_subsets_adjusted**2)
+                if self._n_subsets_adjusted > 0
+                else 1.0
+            )
+        else:
+            kernel_coeff = self.kernel_coeff
+
         # Train local models
         for i, neighbors in enumerate(neighbor_indices):
             try:
@@ -282,7 +296,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
                 # Get predictions and distances for all samples
                 predictions[:, i] = local_est.predict(X)
-                distances[:, i] = rbf_kernel(X, center, self.kernel_coeff)
+                distances[:, i] = rbf_kernel(X, center, kernel_coeff)
 
             except Exception as e:
                 raise RuntimeError(f"Error training local model {i}: {str(e)}") from e
@@ -318,10 +332,16 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         local_preds = np.zeros((n_samples, len(local_models)))
         distances = np.zeros((n_samples, len(local_models)))
 
+        n_subsets = len(local_models)
+        if self.kernel_coeff is None:
+            kernel_coeff = 1.0 / (n_subsets**2) if n_subsets > 0 else 1.0
+        else:
+            kernel_coeff = self.kernel_coeff
+
         for i, local_model in enumerate(local_models):
             try:
                 local_preds[:, i] = local_model.estimator.predict(X)
-                distances[:, i] = rbf_kernel(X, local_model.center, self.kernel_coeff)
+                distances[:, i] = rbf_kernel(X, local_model.center, kernel_coeff)
             except Exception as e:
                 raise RuntimeError(
                     f"Error predicting with local model {i}: {str(e)}"
@@ -461,7 +481,7 @@ class LESSGBRegressor(BaseLESSRegressor):
         The method for selecting subset centers.
     val_size : float, optional
         The proportion of the dataset to reserve for the global estimator.
-    kernel_coeff : float, default=0.1
+    kernel_coeff : float or None, default=0.1
         The RBF kernel coefficient for distance weighting.
     min_neighbors : int, default=10
         The minimum number of neighbors for each local subset.
@@ -493,7 +513,7 @@ class LESSGBRegressor(BaseLESSRegressor):
         global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
         cluster_method: Union[str, Callable[..., Any]] = "tree",
         val_size: Optional[float] = None,
-        kernel_coeff: float = 0.1,
+        kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
         early_stopping_tolerance: float = 1e-8,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
@@ -766,7 +786,7 @@ class LESSAVRegressor(BaseLESSRegressor):
         The method for selecting subset centers.
     val_size : float, optional
         The proportion of the dataset to reserve for the global estimator.
-    kernel_coeff : float, default=0.1
+    kernel_coeff : float or None, default=0.1
         The RBF kernel coefficient for distance weighting.
     min_neighbors : int, default=10
         The minimum number of neighbors for each local subset.
@@ -793,7 +813,7 @@ class LESSAVRegressor(BaseLESSRegressor):
         global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
         cluster_method: Union[str, Callable[..., Any]] = "tree",
         val_size: Optional[float] = None,
-        kernel_coeff: float = 0.1,
+        kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
