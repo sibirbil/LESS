@@ -53,10 +53,10 @@ def _validate_static_hyperparameters(self) -> None:
         raise ValueError(f"learning_rate must be in (0, 1], got {self.learning_rate}")
 
     if self.kernel_coeff is not None and (
-        not isinstance(self.kernel_coeff, (float, int)) or self.kernel_coeff <= 0
+        not isinstance(self.kernel_coeff, (float, int)) or self.kernel_coeff < 0
     ):
         raise ValueError(
-            f"kernel_coeff must be a positive float or None, got {self.kernel_coeff}"
+            f"kernel_coeff must be a non negative float or None, got {self.kernel_coeff}"
         )
 
     if not isinstance(self.min_neighbors, int) or self.min_neighbors <= 0:
