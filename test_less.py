@@ -1,4 +1,4 @@
-import numpy as np
+
 from sklearn.datasets import make_regression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
@@ -51,6 +51,17 @@ def run_tests():
             predictions_val = model_val.predict(X_test)
             mse_val = mean_squared_error(y_test, predictions_val)
             print(f'  -> SUCCESS: Model trained and predicted. MSE: {mse_val:.4f}')
+        except Exception as e:
+            print(f'  -> FAILED: An error occurred: {e}')
+
+        # Test 4: n_estimators parameter
+        try:
+            print('\n4. Testing with n_estimators parameter...')
+            model_estimators = model_class(n_estimators=50, random_state=42)
+            model_estimators.fit(X_train, y_train)
+            predictions_estimators = model_estimators.predict(X_test)
+            mse_estimators = mean_squared_error(y_test, predictions_estimators)
+            print(f'  -> SUCCESS: Model trained and predicted. MSE: {mse_estimators:.4f}')
         except Exception as e:
             print(f'  -> FAILED: An error occurred: {e}')
 

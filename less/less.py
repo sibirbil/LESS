@@ -776,7 +776,7 @@ class LESSAVRegressor(BaseLESSRegressor):
     ----------
     n_subsets : int, default=20
         Number of local subsets to create for training.
-    n_iterations : int, default=100
+    n_estimators : int, default=100
         The number of averaging iterations to perform.
     local_estimator : str or callable, default='linear'
         The local estimator for modeling data subsets.
@@ -808,7 +808,7 @@ class LESSAVRegressor(BaseLESSRegressor):
     def __init__(
         self,
         n_subsets: int = 20,
-        n_iterations: int = 100,
+        n_estimators: int = 100,
         local_estimator: Union[str, Callable[[], Any]] = "linear",
         global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
         cluster_method: Union[str, Callable[..., Any]] = "tree",
@@ -828,7 +828,7 @@ class LESSAVRegressor(BaseLESSRegressor):
             random_state=random_state,
         )
 
-        self.n_iterations = n_iterations
+        self.n_estimators = n_estimators
 
     def _reset_state(self) -> None:
         """Reset the internal state of the regressor for refitting."""
@@ -858,7 +858,7 @@ class LESSAVRegressor(BaseLESSRegressor):
         self._reset_state()
         X, y = self._prepare_fit(X, y, sample_weight)
 
-        for _ in range(self.n_iterations):
+        for _ in range(self.n_estimators):
             try:
                 if self.val_size is not None:
                     X_train, X_val, y_train, y_val = train_test_split(
@@ -901,7 +901,7 @@ class LESSAVRegressor(BaseLESSRegressor):
 
         return self
 
-    def predict(self, X: np.ndarray, n_iterations: Optional[int] = None) -> np.ndarray:
+    def predict(self, X: np.ndarray, n_estimators: Optional[int] = None) -> np.ndarray:
         r"""
         Predict using the fitted LESSAV regressor.
 
@@ -911,7 +911,7 @@ class LESSAVRegressor(BaseLESSRegressor):
         ----------
         X : np.ndarray of shape (n_samples, n_features)
             The input samples to predict.
-        n_iterations : int, optional
+        n_estimators : int, optional
             The number of iterations to use for prediction. If None, all
             available iterations are used.
 
@@ -928,19 +928,19 @@ class LESSAVRegressor(BaseLESSRegressor):
 
         # Determine number of iterations to use
         available_iterations = len(self._local_models_iterations)
-        if n_iterations is None:
-            n_iterations = available_iterations
+        if n_estimators is None:
+            n_estimators = available_iterations
         else:
-            if not isinstance(n_iterations, int) or n_iterations <= 0:
+            if not isinstance(n_estimators, int) or n_estimators <= 0:
                 raise ValueError(
-                    f"n_iterations must be a positive integer, got {n_iterations}"
+                    f"n_estimators must be a positive integer, got {n_estimators}"
                 )
-            n_iterations = min(n_iterations, available_iterations)
+            n_estimators = min(n_estimators, available_iterations)
 
         # Collect predictions from all iterations
         all_predictions = []
 
-        for iteration in range(n_iterations):
+        for iteration in range(n_estimators):
             try:
                 local_models = self._local_models_iterations[iteration]
                 global_model = self._global_models_iterations[iteration]
