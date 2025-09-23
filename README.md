@@ -72,21 +72,17 @@ X_train = SC.fit_transform(X_train)
 X_test = SC.transform(X_test)
 ```
 
-## Parallel Version (Python)
+## R Version (outdated)
 
-An `openmpi` implementation of LESS is also available in [another repository](https://github.com/sibirbil/LESS-MPI).
-
-## R Version
-
-R implementation of LESS is available in [another repository](https://github.com/sibirbil/LESS-R).
+R implementation of an **older version** of LESS is available in [another repository](https://github.com/sibirbil/LESS-R).
 
 ## Citation
 Our software can be cited as:
 ````
   @misc{LESS,
-    author = "Ilker Birbil",
+    author = "Ilker Birbil & Samet Copur",
     title = "LESS: LEarning with Subset Stacking",
-    year = 2021,
+    year = 2025,
     url = "https://github.com/sibirbil/LESS/"
   }
 ````
@@ -108,4 +104,4 @@ Our software can be cited as:
 
 #### Acknowledgments
 
-We thank Oguz Albayrak for his help with structuring our Python scripts.
+We thank Oguz Albayrak for his help with structuring our initial Python scripts.
