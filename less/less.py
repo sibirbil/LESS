@@ -19,7 +19,7 @@ from xgboost import XGBRFRegressor
 
 class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     r"""
-    Base class for LESS (Learning with Subset Selection) Regressors.
+    Base class for LESS (Learning with Subset Stacking) Regressors.
 
     This base class provides common functionality for both gradient boosting
     and averaging variants of the LESS algorithm.
@@ -459,7 +459,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
 class LESSGBRegressor(BaseLESSRegressor):
     r"""
-    LESSGB (Learning with Subset Selection Gradient Boosting) Regressor.
+    LESSGB (Learning with Subset Stacking Gradient Boosting) Regressor.
 
     This regressor implements the gradient boosting variant of the LESS algorithm.
     It iteratively fits stages, where each stage consists of a set of local
@@ -766,7 +766,7 @@ class LESSGBRegressor(BaseLESSRegressor):
 
 class LESSAVRegressor(BaseLESSRegressor):
     r"""
-    LESSAV (Learning with Subset Selection Averaging) Regressor.
+    LESSAV (Learning with Subset Stacking Averaging) Regressor.
 
     This regressor implements the averaging variant of the LESS algorithm.
     It trains multiple iterations of local and global models and averages

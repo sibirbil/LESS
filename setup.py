@@ -15,6 +15,6 @@ setup(
     license="MIT",
     packages=["less"],
     zip_safe=False,
-    python_requires=">=3.9",
+    python_requires=">=3.8",
     install_requires=["scikit-learn>=1.5", "numpy>=2.1", "xgboost>=3.0"],
 )

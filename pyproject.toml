@@ -1,6 +1,62 @@
-[build-system]
-requires = [
-    "setuptools",
-    "wheel"
+[project]
+name = "LESS"
+dynamic = ["version"]
+description = "Learning with Subset Stacking"
+readme = "README.md"
+license = {text = "MIT License"}
+authors = [
+    { name = "Ilker Birbil", email = "sibirbil@gmail.com" },
+    { name = "Samet Copur", email = "sametcopur@yahoo.com" },
 ]
+keywords = [
+    "python",
+    "optimization",
+    "adaptive-random-search",
+    "hyperparameter-tuning",
+    "hyperparameter-optimization",
+    "mixed-parameter-space",
+    "categorical-parameters",
+    "machine-learning",
+    "data-science",
+    "metaheuristics",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.8"
+dependencies = ["numpy", "scikit-learn", "xgboost"]
+
+[project.optional-dependencies]
+extra = ["scipy"]
+
+[tool.setuptools.dynamic]
+version = {attr = "less.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["marsopt"]
+
+[project.urls]
+Repository = "https://github.com/sibirbil/LESS"
+Tracker = "https://github.com/sibirbil/LESS/issues"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
