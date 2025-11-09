@@ -21,7 +21,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     r"""
     Base class for LESS (Learning with Subset Stacking) Regressors.
 
-    This base class provides common functionality for both gradient boosting
+    This base class provides common functionality for both boosting
     and averaging variants of the LESS algorithm.
 
     Parameters
@@ -61,9 +61,9 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
     Attributes
     ----------
-    n_features_in_ : int
+    :attr:`n_features_in_` : int
         The number of features seen during :meth:`fit`.
-    feature_names_in_ : np.ndarray of shape (`n_features_in_`,)
+    :attr:`feature_names_in_` : np.ndarray of shape (`n_features_in_`,)
         Names of features seen during :meth:`fit`. Defined only when `X`
         has feature names that are all strings.
     """
@@ -457,11 +457,11 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         raise NotImplementedError("Subclasses must implement predict method")
 
 
-class LESSGBRegressor(BaseLESSRegressor):
+class LESSBRegressor(BaseLESSRegressor):
     r"""
-    LESSGB (Learning with Subset Stacking Gradient Boosting) Regressor.
+    LESSB (Learning with Subset Stacking Boosting) Regressor.
 
-    This regressor implements the gradient boosting variant of the LESS algorithm.
+    This regressor implements the boosting variant of the LESS algorithm.
     It iteratively fits stages, where each stage consists of a set of local
     models that predict the residuals of the previous stage.
 
@@ -492,9 +492,9 @@ class LESSGBRegressor(BaseLESSRegressor):
 
     Attributes
     ----------
-    n_features_in_ : int
+    :attr:`n_features_in_` : int
         The number of features seen during :meth:`fit`.
-    feature_names_in_ : np.ndarray of shape (`n_features_in_`,)
+    :attr:`feature_names_in_` : np.ndarray of shape (`n_features_in_`,)
         Names of features seen during :meth:`fit`.
     _local_models_stages : list[list[LocalModel]]
         A list containing the lists of local models for each boosting stage.
@@ -626,9 +626,9 @@ class LESSGBRegressor(BaseLESSRegressor):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
-    ) -> "LESSGBRegressor":
+    ) -> "LESSBRegressor":
         r"""
-        Fit the LESSGB regressor using gradient boosting.
+        Fit the LESSB regressor using boosting.
 
         Parameters
         ----------
@@ -641,7 +641,7 @@ class LESSGBRegressor(BaseLESSRegressor):
 
         Returns
         -------
-        LESSGBRegressor
+        LESSBRegressor
             The fitted regressor.
         """
         self._reset_state()
@@ -706,7 +706,7 @@ class LESSGBRegressor(BaseLESSRegressor):
 
     def predict(self, X: np.ndarray, n_rounds: Optional[int] = None) -> np.ndarray:
         r"""
-        Predict using the fitted LESSGB regressor.
+        Predict using the fitted LESSB regressor.
 
         Parameters
         ----------
@@ -764,9 +764,9 @@ class LESSGBRegressor(BaseLESSRegressor):
         return predictions
 
 
-class LESSAVRegressor(BaseLESSRegressor):
+class LESSARegressor(BaseLESSRegressor):
     r"""
-    LESSAV (Learning with Subset Stacking Averaging) Regressor.
+    LESSV (Learning with Subset Stacking Averaging) Regressor.
 
     This regressor implements the averaging variant of the LESS algorithm.
     It trains multiple iterations of local and global models and averages
@@ -795,9 +795,9 @@ class LESSAVRegressor(BaseLESSRegressor):
 
     Attributes
     ----------
-    n_features_in_ : int
+    :attr:`n_features_in_` : int
         The number of features seen during :meth:`fit`.
-    feature_names_in_ : np.ndarray of shape (`n_features_in_`,)
+    :attr:`feature_names_in_` : np.ndarray of shape (`n_features_in_`,)
         Names of features seen during :meth:`fit`.
     _local_models_iterations : list[list[LocalModel]]
         A list containing the lists of local models for each iteration.
@@ -837,9 +837,9 @@ class LESSAVRegressor(BaseLESSRegressor):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
-    ) -> "LESSAVRegressor":
+    ) -> "LESSARegressor":
         r"""
-        Fit the LESSAV regressor using model averaging.
+        Fit the LESSA regressor using model averaging.
 
         Parameters
         ----------
@@ -852,7 +852,7 @@ class LESSAVRegressor(BaseLESSRegressor):
 
         Returns
         -------
-        LESSAVRegressor
+        LESSARegressor
             The fitted regressor.
         """
         self._reset_state()
@@ -903,7 +903,7 @@ class LESSAVRegressor(BaseLESSRegressor):
 
     def predict(self, X: np.ndarray, n_estimators: Optional[int] = None) -> np.ndarray:
         r"""
-        Predict using the fitted LESSAV regressor.
+        Predict using the fitted LESSA regressor.
 
         This method averages the predictions of all trained iterations.
 
