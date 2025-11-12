@@ -51,7 +51,7 @@ extra = ["scipy"]
 version = {attr = "less.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["marsopt"]
+include = ["less"]
 
 [project.urls]
 Repository = "https://github.com/sibirbil/LESS"
