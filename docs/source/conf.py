@@ -8,12 +8,13 @@
 import os
 import sys
 sys.path.insert(0, os.path.abspath('../..'))
-sys.path.insert(0, '/Users/sametcopur/Library/Python/3.9/lib/python/site-packages')
+
+from less import __version__
 
 project = 'LESS'
 copyright = '2025, Samet Çopur'
 author = 'Samet Çopur'
-release = '0.4.0'
+release = __version__
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -22,7 +23,6 @@ extensions = ['sphinx.ext.autodoc']
 
 templates_path = ['_templates']
 exclude_patterns = []
-
 
 
 # -- Options for HTML output -------------------------------------------------
