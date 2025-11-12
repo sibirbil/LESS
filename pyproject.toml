@@ -1,5 +1,5 @@
 [project]
-name = "LESS"
+name = "less-learn"
 dynamic = ["version"]
 description = "Learning with Subset Stacking"
 readme = "README.md"
