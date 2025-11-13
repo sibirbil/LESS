@@ -49,7 +49,7 @@ print(f"Test MSE of LESS: {mse:.2f}")
 Our software can be cited as:
 ````
   @misc{LESS,
-    author = "Ilker Birbil",
+    author = "Ilker Birbil and Samet Copur",
     title = "LESS: Learning with Subset Stacking",
     year = 2025,
     url = "https://github.com/sibirbil/LESS/"
