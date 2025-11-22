@@ -11,6 +11,5 @@ LESS documentation
    :caption: Contents:
 
    getting_started
-   tutorial
-   tutorial2
+   tutorials
    api_reference
