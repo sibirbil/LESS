@@ -89,7 +89,7 @@ Before training, we split the data into training and testing sets. We also scale
 
 **Fitting the Model:**
 
-We initialize ``LESSBRegressor`` with a random state for reproducibility and specify ``LinearRegression`` as the global estimator. Then we fit the model to the training data and evaluate it on the test set.
+We initialize ``LESSBRegressor`` with a random state for reproducibility. Then we fit the model to the training data and evaluate it on the test set.
 
 .. code-block:: python
 
