@@ -12,4 +12,5 @@ LESS documentation
 
    getting_started
    tutorial
+   tutorial2
    api_reference
