@@ -42,7 +42,7 @@ Here is a simple one-dimensional regression problem. This synthetic dataset is g
 .. code-block:: python
 
     def synthetic_sine_curve(n_samples=300):
-        plt.figure(figsize=(6, 2))
+        plt.figure(figsize=(10, 4))
 
         # Generate data
         X = np.random.uniform(-10, 10, (n_samples, 1))
@@ -61,6 +61,11 @@ Here is a simple one-dimensional regression problem. This synthetic dataset is g
         return X, y
 
     X, y = synthetic_sine_curve()
+
+.. image:: _static/tutorial/dataset.png
+    :align: center
+    :alt: Syntetic Dataset
+
 
 Training LESS
 -------------

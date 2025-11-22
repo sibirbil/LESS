@@ -14,7 +14,6 @@ We will also dive deep into the critical parameters that control the behavior of
 
     import numpy as np
     import pandas as pd
-    import seaborn as sns
 
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import StandardScaler
@@ -23,8 +22,6 @@ We will also dive deep into the critical parameters that control the behavior of
     from sklearn.tree import DecisionTreeRegressor
 
     from less import LESSARegressor, LESSBRegressor
-
-    sns.set_theme(style="whitegrid")
 
 Data Preparation
 ----------------
