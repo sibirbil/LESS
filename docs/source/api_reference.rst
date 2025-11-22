@@ -14,7 +14,3 @@ This page provides a detailed reference to the LESS API.
 
    .. autoclass:: LESSARegressor
       :members: fit, predict
-
-.. automodule:: less._utils
-   :members:
-
