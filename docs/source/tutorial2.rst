@@ -88,8 +88,8 @@ Output:
 Key Parameters: ``n_estimators`` and ``learning_rate``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-*   **``n_estimators``**: The number of boosting stages (default: 100).
-*   **``learning_rate``**: Shrinks the contribution of each estimator (default: 0.1). There is a trade-off between ``learning_rate`` and ``n_estimators``.
+*   ``n_estimators``: The number of boosting stages (default: 100).
+*   ``learning_rate``: Shrinks the contribution of each estimator (default: 0.1). There is a trade-off between ``learning_rate`` and ``n_estimators``.
 
 .. code-block:: python
 
@@ -179,6 +179,7 @@ This defines the model used for each local subset.
 
 *   **Default:** ``'linear'`` (uses ``LinearRegression``)
 *   **Options:**
+
     *   ``'linear'``: Standard Linear Regression.
     *   ``'tree'``: A ``DecisionTreeRegressor`` with specific parameters (max_leaf_nodes=31, etc.).
     *   **Custom:** You can pass any callable that returns a scikit-learn compatible regressor (e.g., ``lambda: SVR()``).
@@ -209,6 +210,7 @@ The global estimator combines the predictions of the local models.
 
 *   **Default:** ``'xgboost'`` (uses ``XGBRFRegressor``)
 *   **Options:**
+
     *   ``'xgboost'``: Random Forest regressor from XGBoost.
     *   ``None``: Removes the global estimator. The final prediction becomes a weighted average of local predictions.
     *   **Custom:** Any callable returning a regressor (e.g., ``lambda: RandomForestRegressor()``).
@@ -260,6 +262,7 @@ This parameter controls how the centers of the subsets are selected.
 
 *   **Default:** ``'tree'`` (Random sampling). It selects ``n_subsets`` centers randomly from the data.
 *   **Options:**
+
     *   ``'tree'``: Random sampling.
     *   ``'kmeans'``: Uses K-Means clustering. **Crucially, the number of clusters is set equal to** ``n_subsets``. The cluster centers found by K-Means become the centers of the subsets.
 
