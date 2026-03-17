@@ -11,7 +11,7 @@ from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.linear_model import LinearRegression
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
-from xgboost import DMatrix, XGBRFRegressor, XGBRegressor, train as xgb_train
+from xgboost import DMatrix, XGBRFRegressor, train as xgb_train
 
 INTERNAL_DTYPE = np.float32
 
@@ -126,6 +126,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
         _validate_static_hyperparameters(self)
 
+        self._native_global_xgb_base_params = (
+            self._build_native_global_xgboost_base_params()
+        )
+
         # Initialize random generator
         self._rng = np.random.RandomState(self.random_state)
 
@@ -134,16 +138,11 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         if self.local_estimator == "linear":
             return lambda: LinearRegression()
         elif self.local_estimator == "tree":
-            return lambda: XGBRegressor(
-                n_estimators=1,
-                tree_method="exact",
-                objective="reg:squarederror",
-                learning_rate=1.0,
-                max_depth=5,
-                #min_child_weight=2,
-                n_jobs=1,
-                verbosity=0,
-                random_state=self._rng.randint(2**31),
+            return lambda: _NativeXGBoostRegressor(
+                params=self._get_native_local_xgboost_params(
+                    self._rng.randint(2**31)
+                ),
+                num_boost_round=1,
             )
         elif callable(self.local_estimator):
             return self.local_estimator
@@ -168,12 +167,38 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
     def _get_native_xgboost_params(self, random_state: int) -> dict[str, Any]:
         """Mirror the current XGBRFRegressor defaults for the native train API."""
+        params = self._native_global_xgb_base_params.copy()
+        params["seed"] = random_state
+        return params
+
+    def _build_native_global_xgboost_base_params(self) -> dict[str, Any]:
+        """Build the native XGBoost param template once and reuse it."""
         wrapper_params = XGBRFRegressor(
             n_estimators=25,
-            random_state=random_state,
+            random_state=0,
             verbosity=0,
         ).get_xgb_params()
 
+        params = self._to_native_xgboost_params(wrapper_params)
+        params.pop("seed", None)
+        return params
+
+    def _get_native_local_xgboost_params(self, random_state: int) -> dict[str, Any]:
+        """Native params for the local single-tree XGBoost estimator."""
+        return {
+            "tree_method": "exact",
+            "objective": "reg:squarederror",
+            "learning_rate": 1.0,
+            "max_depth": 5,
+            "nthread": 1,
+            "verbosity": 0,
+            "seed": random_state,
+        }
+
+    def _to_native_xgboost_params(
+        self, wrapper_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Convert sklearn-style XGBoost params to native train params."""
         params = {}
         for key, value in wrapper_params.items():
             if value is None:
@@ -234,13 +259,20 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         return self.kernel_coeff
 
     def _compute_distance_matrix(
-        self, X: np.ndarray, centers: np.ndarray, kernel_coeff: float
+        self,
+        X: np.ndarray,
+        centers: np.ndarray,
+        kernel_coeff: float,
+        x_sq_norms: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Compute all RBF distances in one vectorized pass."""
         if X.shape[0] == 0 or centers.shape[0] == 0:
             return np.zeros((X.shape[0], centers.shape[0]), dtype=X.dtype)
 
-        x_sq_norms = np.sum(X * X, axis=1, keepdims=True)
+        if x_sq_norms is None:
+            x_sq_norms = np.sum(X * X, axis=1)
+
+        x_sq_norms = np.asarray(x_sq_norms, dtype=X.dtype).reshape(-1, 1)
         center_sq_norms = np.sum(centers * centers, axis=1, keepdims=True).T
         squared_distances = np.maximum(
             x_sq_norms + center_sq_norms - 2.0 * X @ centers.T,
@@ -250,7 +282,11 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         return self._safe_normalize_distances(distances)
 
     def _find_neighbor_indices(
-        self, X: np.ndarray, centers: np.ndarray, n_neighbors: int
+        self,
+        X: np.ndarray,
+        centers: np.ndarray,
+        n_neighbors: int,
+        x_sq_norms: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Find exact nearest neighbors with brute-force top-k selection."""
         n_samples = X.shape[0]
@@ -263,7 +299,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 (centers.shape[0], n_samples),
             ).copy()
 
-        x_sq_norms = np.sum(X * X, axis=1)
+        if x_sq_norms is None:
+            x_sq_norms = np.sum(X * X, axis=1)
+
+        x_sq_norms = np.asarray(x_sq_norms, dtype=X.dtype)
         center_sq_norms = np.sum(centers * centers, axis=1, keepdims=True)
         squared_distances = np.maximum(
             center_sq_norms + x_sq_norms[np.newaxis, :] - 2.0 * centers @ X.T,
@@ -303,6 +342,20 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 pass
 
         predictions = []
+        if all(
+            isinstance(local_model.estimator, _NativeXGBoostRegressor)
+            for local_model in local_models
+        ):
+            shared_dmatrix = DMatrix(X)
+            for i, local_model in enumerate(local_models):
+                try:
+                    predictions.append(local_model.estimator.predict(shared_dmatrix))
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Error predicting with local model {i}: {str(e)}"
+                    ) from e
+            return np.column_stack(predictions).astype(INTERNAL_DTYPE, copy=False)
+
         for i, local_model in enumerate(local_models):
             try:
                 predictions.append(local_model.estimator.predict(X))
@@ -373,7 +426,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         X: np.ndarray,
         y: np.ndarray,
         prediction_data: Optional[np.ndarray] = None,
-    ) -> tuple[list[LocalModel], Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> tuple[list[LocalModel], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         r"""
         Build local models for one stage of the algorithm.
 
@@ -389,19 +442,27 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
         Returns
         -------
-        tuple[list[LocalModel], Optional[np.ndarray], Optional[np.ndarray]]
+        tuple[list[LocalModel], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]
             A tuple containing:
             - A list of trained `LocalModel` instances.
+            - An array containing the center matrix of local models.
             - An optional array of predictions from each local model.
             - An optional array of distance-based weights for each sample.
         """
         # Get cluster centers
         centers = self._get_cluster_centers(X)
+        x_sq_norms = np.sum(X * X, axis=1)
 
         # High-dimensional data benefits more from brute-force top-k than tree search.
-        neighbor_indices = self._find_neighbor_indices(X, centers, self._n_neighbors)
+        neighbor_indices = self._find_neighbor_indices(
+            X,
+            centers,
+            self._n_neighbors,
+            x_sq_norms=x_sq_norms,
+        )
 
         local_models = []
+        local_centers = []
 
         # Train local models
         for i, neighbors in enumerate(neighbor_indices):
@@ -418,19 +479,35 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
                 # Store model
                 local_models.append(LocalModel(local_est, center))
+                local_centers.append(center)
 
             except Exception as e:
                 raise RuntimeError(f"Error training local model {i}: {str(e)}") from e
 
+        if local_centers:
+            center_matrix = np.vstack(local_centers).astype(INTERNAL_DTYPE, copy=False)
+        else:
+            center_matrix = np.zeros((0, X.shape[1]), dtype=INTERNAL_DTYPE)
+
         if prediction_data is None:
-            return local_models, None, None
+            return local_models, center_matrix, None, None
 
-        predictions, distances = self._predict_with_models(prediction_data, local_models)
+        prediction_x_sq_norms = x_sq_norms if prediction_data is X else None
+        predictions, distances = self._predict_with_models(
+            prediction_data,
+            local_models,
+            center_matrix=center_matrix,
+            x_sq_norms=prediction_x_sq_norms,
+        )
 
-        return local_models, predictions, distances
+        return local_models, center_matrix, predictions, distances
 
     def _predict_with_models(
-        self, X: np.ndarray, local_models: list[LocalModel]
+        self,
+        X: np.ndarray,
+        local_models: list[LocalModel],
+        center_matrix: Optional[np.ndarray] = None,
+        x_sq_norms: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         r"""
         Generate predictions from a list of trained local models.
@@ -450,13 +527,18 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             - An array of distance-based weights.
         """
         local_preds = self._predict_local_outputs(X, local_models)
-        if local_models:
+        if center_matrix is None and local_models:
             center_matrix = np.vstack([local_model.center for local_model in local_models])
-        else:
+        elif center_matrix is None:
             center_matrix = np.zeros((0, X.shape[1]), dtype=X.dtype)
 
         kernel_coeff = self._get_kernel_coeff(len(local_models))
-        distances = self._compute_distance_matrix(X, center_matrix, kernel_coeff)
+        distances = self._compute_distance_matrix(
+            X,
+            center_matrix,
+            kernel_coeff,
+            x_sq_norms=x_sq_norms,
+        )
 
         return local_preds, distances
 
@@ -651,12 +733,14 @@ class LESSBRegressor(BaseLESSRegressor):
     def _reset_state(self) -> None:
         """Reset the internal state of the regressor for refitting."""
         self._local_models_stages = []
+        self._local_center_matrices_stages = []
         self._global_models_stages = []
         self._base_prediction = 0.0
 
     def _build_stage(
         self,
         local_models: list[LocalModel],
+        center_matrix: np.ndarray,
         X_train: np.ndarray,
         y_train: np.ndarray,
         X_val: Optional[np.ndarray],
@@ -689,7 +773,11 @@ class LESSBRegressor(BaseLESSRegressor):
         if self._global_estimator_factory is not None:
             # If validation set exists, train global model on its predictions
             if X_val is not None and y_val is not None:
-                local_preds, distances = self._predict_with_models(X_val, local_models)
+                local_preds, distances = self._predict_with_models(
+                    X_val,
+                    local_models,
+                    center_matrix=center_matrix,
+                )
                 Z_global = distances * local_preds
                 y_global = y_val
             # Otherwise, train global model on the training set predictions
@@ -698,7 +786,9 @@ class LESSBRegressor(BaseLESSRegressor):
                     Z_global = cached_train_features
                 elif cached_train_outputs is None:
                     local_preds, distances = self._predict_with_models(
-                        X_train, local_models
+                        X_train,
+                        local_models,
+                        center_matrix=center_matrix,
                     )
                     Z_global = distances * local_preds
                 else:
@@ -715,7 +805,11 @@ class LESSBRegressor(BaseLESSRegressor):
         return global_est
 
     def _predict_stage(
-        self, X: np.ndarray, local_models: list[LocalModel], global_model: Optional[Any]
+        self,
+        X: np.ndarray,
+        local_models: list[LocalModel],
+        center_matrix: np.ndarray,
+        global_model: Optional[Any],
     ) -> np.ndarray:
         r"""
         Make predictions for a single boosting stage.
@@ -734,7 +828,11 @@ class LESSBRegressor(BaseLESSRegressor):
         np.ndarray
             The predictions for the stage.
         """
-        local_preds, distances = self._predict_with_models(X, local_models)
+        local_preds, distances = self._predict_with_models(
+            X,
+            local_models,
+            center_matrix=center_matrix,
+        )
         Z = distances * local_preds
 
         if global_model is not None:
@@ -794,7 +892,12 @@ class LESSBRegressor(BaseLESSRegressor):
                     X_val, residuals_val = None, None
 
                 prediction_data = X_train if self.val_size is None else None
-                local_models, train_local_preds, train_distances = self._build_local_models(
+                (
+                    local_models,
+                    center_matrix,
+                    train_local_preds,
+                    train_distances,
+                ) = self._build_local_models(
                     X_train, residuals_train, prediction_data=prediction_data
                 )
 
@@ -806,6 +909,7 @@ class LESSBRegressor(BaseLESSRegressor):
                     Z_stage = train_distances * train_local_preds
                     global_model = self._build_stage(
                         local_models,
+                        center_matrix,
                         X_train,
                         residuals_train,
                         X_val,
@@ -819,9 +923,19 @@ class LESSBRegressor(BaseLESSRegressor):
                         stage_predictions = np.sum(Z_stage, axis=1)
                 else:
                     global_model = self._build_stage(
-                        local_models, X_train, residuals_train, X_val, residuals_val
+                        local_models,
+                        center_matrix,
+                        X_train,
+                        residuals_train,
+                        X_val,
+                        residuals_val,
                     )
-                    stage_predictions = self._predict_stage(X, local_models, global_model)
+                    stage_predictions = self._predict_stage(
+                        X,
+                        local_models,
+                        center_matrix,
+                        global_model,
+                    )
 
                 if not np.all(np.isfinite(stage_predictions)):
                     warnings.warn(
@@ -833,6 +947,7 @@ class LESSBRegressor(BaseLESSRegressor):
                 current_predictions += learning_rate * stage_predictions
 
                 self._local_models_stages.append(local_models)
+                self._local_center_matrices_stages.append(center_matrix)
                 self._global_models_stages.append(global_model)
 
                 mean_abs_residual = np.mean(np.abs(y - current_predictions))
@@ -896,8 +1011,14 @@ class LESSBRegressor(BaseLESSRegressor):
         for stage in range(n_rounds):
             try:
                 local_models = self._local_models_stages[stage]
+                center_matrix = self._local_center_matrices_stages[stage]
                 global_model = self._global_models_stages[stage]
-                stage_predictions = self._predict_stage(X, local_models, global_model)
+                stage_predictions = self._predict_stage(
+                    X,
+                    local_models,
+                    center_matrix,
+                    global_model,
+                )
 
                 # Validate stage predictions
                 if np.all(np.isfinite(stage_predictions)):
@@ -986,6 +1107,7 @@ class LESSARegressor(BaseLESSRegressor):
     def _reset_state(self) -> None:
         """Reset the internal state of the regressor for refitting."""
         self._local_models_iterations = []
+        self._local_center_matrices_iterations = []
         self._global_models_iterations = []
 
     def fit(
@@ -1026,7 +1148,7 @@ class LESSARegressor(BaseLESSRegressor):
                     if self.val_size is None and self._global_estimator_factory is not None
                     else None
                 )
-                local_models, train_preds, train_dists = self._build_local_models(
+                local_models, center_matrix, train_preds, train_dists = self._build_local_models(
                     X_train, y_train, prediction_data=prediction_data
                 )
 
@@ -1034,7 +1156,9 @@ class LESSARegressor(BaseLESSRegressor):
                 if self._global_estimator_factory is not None:
                     if X_val is not None and y_val is not None:
                         val_preds, val_dists = self._predict_with_models(
-                            X_val, local_models
+                            X_val,
+                            local_models,
+                            center_matrix=center_matrix,
                         )
                         Z_global = val_dists * val_preds
                         y_global = y_val
@@ -1050,6 +1174,7 @@ class LESSARegressor(BaseLESSRegressor):
                     global_est.fit(Z_global, y_global)
 
                 self._local_models_iterations.append(local_models)
+                self._local_center_matrices_iterations.append(center_matrix)
                 self._global_models_iterations.append(global_est)
 
             except Exception as e:
@@ -1105,10 +1230,15 @@ class LESSARegressor(BaseLESSRegressor):
         for iteration in range(n_estimators):
             try:
                 local_models = self._local_models_iterations[iteration]
+                center_matrix = self._local_center_matrices_iterations[iteration]
                 global_model = self._global_models_iterations[iteration]
 
                 # Get local predictions and distances
-                local_preds, distances = self._predict_with_models(X, local_models)
+                local_preds, distances = self._predict_with_models(
+                    X,
+                    local_models,
+                    center_matrix=center_matrix,
+                )
 
                 # Create features
                 Z = distances * local_preds
