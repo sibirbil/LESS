@@ -330,6 +330,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         local_models: list[LocalModel],
         linear_coefs: Optional[np.ndarray] = None,
         linear_intercepts: Optional[np.ndarray] = None,
+        shared_dmatrix: Optional[DMatrix] = None,
     ) -> np.ndarray:
         """Predict local model outputs, using a single matmul for linear models."""
         if not local_models:
@@ -368,7 +369,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             isinstance(local_model.estimator, _NativeXGBoostRegressor)
             for local_model in local_models
         ):
-            shared_dmatrix = DMatrix(X)
+            if shared_dmatrix is None:
+                shared_dmatrix = DMatrix(X)
             for i, local_model in enumerate(local_models):
                 try:
                     predictions.append(local_model.estimator.predict(shared_dmatrix))
@@ -588,6 +590,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         x_sq_norms: Optional[np.ndarray] = None,
         linear_coefs: Optional[np.ndarray] = None,
         linear_intercepts: Optional[np.ndarray] = None,
+        shared_dmatrix: Optional[DMatrix] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         r"""
         Generate predictions from a list of trained local models.
@@ -611,6 +614,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             local_models,
             linear_coefs=linear_coefs,
             linear_intercepts=linear_intercepts,
+            shared_dmatrix=shared_dmatrix,
         )
         if center_matrix is None and local_models:
             center_matrix = np.vstack([local_model.center for local_model in local_models])
@@ -908,6 +912,7 @@ class LESSBRegressor(BaseLESSRegressor):
         linear_intercepts: Optional[np.ndarray],
         global_model: Optional[Any],
         x_sq_norms: Optional[np.ndarray] = None,
+        shared_dmatrix: Optional[DMatrix] = None,
     ) -> np.ndarray:
         r"""
         Make predictions for a single boosting stage.
@@ -933,6 +938,7 @@ class LESSBRegressor(BaseLESSRegressor):
             x_sq_norms=x_sq_norms,
             linear_coefs=linear_coefs,
             linear_intercepts=linear_intercepts,
+            shared_dmatrix=shared_dmatrix,
         )
         Z = distances * local_preds
 
@@ -1121,6 +1127,7 @@ class LESSBRegressor(BaseLESSRegressor):
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
         x_sq_norms = np.sum(X * X, axis=1)
+        shared_dmatrix = None
 
         # Add predictions from specified number of stages
         for stage in range(n_rounds):
@@ -1130,6 +1137,11 @@ class LESSBRegressor(BaseLESSRegressor):
                 linear_coefs = self._local_linear_coefs_stages[stage]
                 linear_intercepts = self._local_linear_intercepts_stages[stage]
                 global_model = self._global_models_stages[stage]
+                if shared_dmatrix is None and all(
+                    isinstance(local_model.estimator, _NativeXGBoostRegressor)
+                    for local_model in local_models
+                ):
+                    shared_dmatrix = DMatrix(X)
                 stage_predictions = self._predict_stage(
                     X,
                     local_models,
@@ -1138,6 +1150,7 @@ class LESSBRegressor(BaseLESSRegressor):
                     linear_intercepts,
                     global_model,
                     x_sq_norms=x_sq_norms,
+                    shared_dmatrix=shared_dmatrix,
                 )
 
                 # Validate stage predictions
@@ -1355,9 +1368,10 @@ class LESSARegressor(BaseLESSRegressor):
                 )
             n_estimators = min(n_estimators, available_iterations)
 
-        # Collect predictions from all iterations
-        all_predictions = []
+        prediction_sum = np.zeros(n_samples, dtype=INTERNAL_DTYPE)
+        valid_prediction_count = 0
         x_sq_norms = np.sum(X * X, axis=1)
+        shared_dmatrix = None
 
         for iteration in range(n_estimators):
             try:
@@ -1366,6 +1380,11 @@ class LESSARegressor(BaseLESSRegressor):
                 linear_coefs = self._local_linear_coefs_iterations[iteration]
                 linear_intercepts = self._local_linear_intercepts_iterations[iteration]
                 global_model = self._global_models_iterations[iteration]
+                if shared_dmatrix is None and all(
+                    isinstance(local_model.estimator, _NativeXGBoostRegressor)
+                    for local_model in local_models
+                ):
+                    shared_dmatrix = DMatrix(X)
 
                 # Get local predictions and distances
                 local_preds, distances = self._predict_with_models(
@@ -1375,6 +1394,7 @@ class LESSARegressor(BaseLESSRegressor):
                     x_sq_norms=x_sq_norms,
                     linear_coefs=linear_coefs,
                     linear_intercepts=linear_intercepts,
+                    shared_dmatrix=shared_dmatrix,
                 )
 
                 # Create features
@@ -1389,7 +1409,8 @@ class LESSARegressor(BaseLESSRegressor):
 
                 # Validate predictions
                 if np.all(np.isfinite(iteration_predictions)):
-                    all_predictions.append(iteration_predictions)
+                    prediction_sum += iteration_predictions
+                    valid_prediction_count += 1
                 else:
                     warnings.warn(
                         f"Non-finite predictions in iteration {iteration}, skipping",
@@ -1402,10 +1423,9 @@ class LESSARegressor(BaseLESSRegressor):
                 )
                 continue
 
-        if len(all_predictions) == 0:
+        if valid_prediction_count == 0:
             raise RuntimeError("No valid predictions from any iteration")
 
-        # Average all predictions
-        predictions = np.mean(all_predictions, axis=0, dtype=INTERNAL_DTYPE)
+        predictions = prediction_sum / INTERNAL_DTYPE(valid_prediction_count)
 
         return predictions
