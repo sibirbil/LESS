@@ -10,11 +10,6 @@ class LocalModel(NamedTuple):
     center: np.array
 
 
-def rbf_kernel(data, center, coeff=0.5):
-    """RBF kernel using L2 norm with fixed coefficient"""
-    return np.exp(-coeff * np.linalg.norm(data - center, ord=2, axis=1))
-
-
 def _validate_static_hyperparameters(self) -> None:
     r"""
     Validate data-independent hyperparameters at initialization.
