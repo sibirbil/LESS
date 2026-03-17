@@ -14,6 +14,8 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
 from xgboost import DMatrix, XGBRFRegressor, XGBRegressor, train as xgb_train
 
+INTERNAL_DTYPE = np.float32
+
 
 class _NativeXGBoostRegressor:
     """Minimal regressor wrapper around xgboost.train with DMatrix caching."""
@@ -271,7 +273,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                     ],
                     dtype=coefs.dtype,
                 )
-                return X @ coefs.T + intercepts
+                return (X @ coefs.T + intercepts).astype(INTERNAL_DTYPE, copy=False)
             except Exception:
                 # Fall back to the generic prediction loop if an estimator exposes
                 # coef_/intercept_ in an incompatible format.
@@ -286,7 +288,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                     f"Error predicting with local model {i}: {str(e)}"
                 ) from e
 
-        return np.column_stack(predictions)
+        return np.column_stack(predictions).astype(INTERNAL_DTYPE, copy=False)
 
     def _get_cluster_centers(self, X: np.ndarray) -> np.ndarray:
         r"""
@@ -473,7 +475,12 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         check_is_fitted(self)
 
         # Validate input
-        X = check_array(X, accept_sparse=False, dtype=np.float64)
+        X = check_array(
+            X,
+            accept_sparse=False,
+            dtype=INTERNAL_DTYPE,
+            order="C",
+        )
 
         # Check feature count consistency
         if X.shape[1] != self.n_features_in_:
@@ -511,8 +518,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             accept_sparse=False,
             y_numeric=True,
             multi_output=False,
-            dtype=np.float64,
+            dtype=INTERNAL_DTYPE,
+            order="C",
         )
+        y = np.asarray(y, dtype=INTERNAL_DTYPE)
 
         if sample_weight is not None:
             warnings.warn(
@@ -744,11 +753,16 @@ class LESSBRegressor(BaseLESSRegressor):
         self._reset_state()
         X, y = self._prepare_fit(X, y, sample_weight)
 
-        self._base_prediction = np.mean(y)
+        self._base_prediction = np.mean(y, dtype=INTERNAL_DTYPE).astype(INTERNAL_DTYPE)
         if not np.isfinite(self._base_prediction):
             raise ValueError("Target values contain non-finite values")
 
-        current_predictions = np.full(y.shape, self._base_prediction)
+        current_predictions = np.full(
+            y.shape,
+            self._base_prediction,
+            dtype=INTERNAL_DTYPE,
+        )
+        learning_rate = INTERNAL_DTYPE(self.learning_rate)
 
         for stage in range(self.n_estimators):
             try:
@@ -799,7 +813,7 @@ class LESSBRegressor(BaseLESSRegressor):
                     )
                     continue
 
-                current_predictions += self.learning_rate * stage_predictions
+                current_predictions += learning_rate * stage_predictions
 
                 self._local_models_stages.append(local_models)
                 self._global_models_stages.append(global_model)
@@ -842,7 +856,7 @@ class LESSBRegressor(BaseLESSRegressor):
 
         n_samples = X.shape[0]
         if n_samples == 0:
-            return np.array([])
+            return np.array([], dtype=INTERNAL_DTYPE)
 
         # Determine number of rounds to use
         available_rounds = len(self._local_models_stages)
@@ -854,7 +868,12 @@ class LESSBRegressor(BaseLESSRegressor):
             n_rounds = min(n_rounds, available_rounds)
 
         # Start with base prediction
-        predictions = np.full(n_samples, self._base_prediction)
+        predictions = np.full(
+            n_samples,
+            self._base_prediction,
+            dtype=INTERNAL_DTYPE,
+        )
+        learning_rate = INTERNAL_DTYPE(self.learning_rate)
 
         # Add predictions from specified number of stages
         for stage in range(n_rounds):
@@ -865,7 +884,7 @@ class LESSBRegressor(BaseLESSRegressor):
 
                 # Validate stage predictions
                 if np.all(np.isfinite(stage_predictions)):
-                    predictions += self.learning_rate * stage_predictions
+                    predictions += learning_rate * stage_predictions
                 else:
                     warnings.warn(
                         f"Non-finite predictions in stage {stage}, skipping",
@@ -1050,7 +1069,7 @@ class LESSARegressor(BaseLESSRegressor):
 
         n_samples = X.shape[0]
         if n_samples == 0:
-            return np.array([])
+            return np.array([], dtype=INTERNAL_DTYPE)
 
         # Determine number of iterations to use
         available_iterations = len(self._local_models_iterations)
@@ -1103,6 +1122,6 @@ class LESSARegressor(BaseLESSRegressor):
             raise RuntimeError("No valid predictions from any iteration")
 
         # Average all predictions
-        predictions = np.mean(all_predictions, axis=0)
+        predictions = np.mean(all_predictions, axis=0, dtype=INTERNAL_DTYPE)
 
         return predictions
