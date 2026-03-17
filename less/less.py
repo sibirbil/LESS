@@ -158,21 +158,12 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             distances[zero_mask] = uniform_weight
             distance_sums[zero_mask] = 1.0
 
-        # Normalize with numerical stability
-        normalized = np.divide(
+        return np.divide(
             distances,
             distance_sums,
             out=np.zeros_like(distances),
             where=distance_sums != 0,
         )
-
-        # Final normalization check
-        row_sums = np.sum(normalized, axis=1, keepdims=True)
-        normalized = np.divide(
-            normalized, row_sums, out=normalized, where=row_sums != 0
-        )
-
-        return normalized
 
     def _get_kernel_coeff(self, n_subsets: int) -> float:
         """Resolve the effective kernel coefficient for the given subset count."""
