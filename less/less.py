@@ -25,13 +25,9 @@ class _NativeXGBoostRegressor:
         self.params = params
         self.num_boost_round = num_boost_round
         self._booster = None
-        self._cached_input = None
-        self._cached_dmatrix = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "_NativeXGBoostRegressor":
         dtrain = DMatrix(X, label=y)
-        self._cached_input = X
-        self._cached_dmatrix = dtrain
         self._booster = xgb_train(
             params=self.params,
             dtrain=dtrain,
@@ -43,15 +39,7 @@ class _NativeXGBoostRegressor:
         if self._booster is None:
             raise ValueError("Model is not fitted")
 
-        if isinstance(X, DMatrix):
-            dmatrix = X
-        elif X is self._cached_input and self._cached_dmatrix is not None:
-            dmatrix = self._cached_dmatrix
-        else:
-            dmatrix = DMatrix(X)
-            self._cached_input = X
-            self._cached_dmatrix = dmatrix
-
+        dmatrix = X if isinstance(X, DMatrix) else DMatrix(X)
         return self._booster.predict(dmatrix)
 
 
