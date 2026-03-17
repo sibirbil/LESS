@@ -186,12 +186,14 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_native_local_xgboost_params(self, random_state: int) -> dict[str, Any]:
         """Native params for the local single-tree XGBoost estimator."""
         return {
-            "tree_method": "exact",
+            "tree_method": "hist",
+            "grow_policy": "lossguide",
+            "max_leaves": 31,
+            "max_depth": 0,
             "objective": "reg:squarederror",
             "learning_rate": 1.0,
             "gamma": 0.0,
-            "max_depth": 5,
-            "min_child_weight": 1.0,
+            "min_child_weight": 2.0,
             "subsample": 1.0,
             "colsample_bytree": 1.0,
             "reg_lambda": 0.0,
