@@ -12,7 +12,44 @@ from sklearn.neighbors import KDTree
 from sklearn.linear_model import LinearRegression
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
-from xgboost import XGBRFRegressor, XGBRegressor
+from xgboost import DMatrix, XGBRFRegressor, XGBRegressor, train as xgb_train
+
+
+class _NativeXGBoostRegressor:
+    """Minimal regressor wrapper around xgboost.train with DMatrix caching."""
+
+    def __init__(self, params: dict[str, Any], num_boost_round: int = 1):
+        self.params = params
+        self.num_boost_round = num_boost_round
+        self._booster = None
+        self._cached_input = None
+        self._cached_dmatrix = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "_NativeXGBoostRegressor":
+        dtrain = DMatrix(X, label=y)
+        self._cached_input = X
+        self._cached_dmatrix = dtrain
+        self._booster = xgb_train(
+            params=self.params,
+            dtrain=dtrain,
+            num_boost_round=self.num_boost_round,
+        )
+        return self
+
+    def predict(self, X: Union[np.ndarray, DMatrix]) -> np.ndarray:
+        if self._booster is None:
+            raise ValueError("Model is not fitted")
+
+        if isinstance(X, DMatrix):
+            dmatrix = X
+        elif X is self._cached_input and self._cached_dmatrix is not None:
+            dmatrix = self._cached_dmatrix
+        else:
+            dmatrix = DMatrix(X)
+            self._cached_input = X
+            self._cached_dmatrix = dmatrix
+
+        return self._booster.predict(dmatrix)
 
 
 class BaseLESSRegressor(BaseEstimator, RegressorMixin):
@@ -115,8 +152,11 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_global_estimator_factory(self) -> Optional[Callable[[], Any]]:
         """Get the factory function for creating the global estimator instance."""
         if self.global_estimator == "xgboost":
-            return lambda: XGBRFRegressor(
-                n_estimators=25, random_state=self._rng.randint(2**31), verbosity=0
+            return lambda: _NativeXGBoostRegressor(
+                params=self._get_native_xgboost_params(
+                    self._rng.randint(2**31)
+                ),
+                num_boost_round=1,
             )
         elif self.global_estimator is None:
             return None
@@ -124,6 +164,27 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             return self.global_estimator
         else:
             raise ValueError(f"Invalid global_estimator: {self.global_estimator}")
+
+    def _get_native_xgboost_params(self, random_state: int) -> dict[str, Any]:
+        """Mirror the current XGBRFRegressor defaults for the native train API."""
+        wrapper_params = XGBRFRegressor(
+            n_estimators=25,
+            random_state=random_state,
+            verbosity=0,
+        ).get_xgb_params()
+
+        params = {}
+        for key, value in wrapper_params.items():
+            if value is None:
+                continue
+            if key == "random_state":
+                params["seed"] = value
+            elif key == "n_jobs":
+                params["nthread"] = value
+            else:
+                params[key] = value
+
+        return params
 
     def _safe_normalize_distances(self, distances: np.ndarray) -> np.ndarray:
         r"""
@@ -575,6 +636,7 @@ class LESSBRegressor(BaseLESSRegressor):
         X_val: Optional[np.ndarray],
         y_val: Optional[np.ndarray],
         cached_train_outputs: Optional[tuple[np.ndarray, np.ndarray]] = None,
+        cached_train_features: Optional[np.ndarray] = None,
     ) -> Optional[Any]:
         r"""
         Build the global model for a single boosting stage.
@@ -606,13 +668,16 @@ class LESSBRegressor(BaseLESSRegressor):
                 y_global = y_val
             # Otherwise, train global model on the training set predictions
             else:
-                if cached_train_outputs is None:
+                if cached_train_features is not None:
+                    Z_global = cached_train_features
+                elif cached_train_outputs is None:
                     local_preds, distances = self._predict_with_models(
                         X_train, local_models
                     )
+                    Z_global = distances * local_preds
                 else:
                     local_preds, distances = cached_train_outputs
-                Z_global = distances * local_preds
+                    Z_global = distances * local_preds
                 y_global = y_train
 
             try:
@@ -707,6 +772,7 @@ class LESSBRegressor(BaseLESSRegressor):
                         raise RuntimeError(
                             "Training predictions were not computed for the stage"
                         )
+                    Z_stage = train_distances * train_local_preds
                     global_model = self._build_stage(
                         local_models,
                         X_train,
@@ -714,8 +780,8 @@ class LESSBRegressor(BaseLESSRegressor):
                         X_val,
                         residuals_val,
                         cached_train_outputs=(train_local_preds, train_distances),
+                        cached_train_features=Z_stage,
                     )
-                    Z_stage = train_distances * train_local_preds
                     if global_model is not None:
                         stage_predictions = global_model.predict(Z_stage)
                     else:
