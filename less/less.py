@@ -196,6 +196,46 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         distances = np.exp(-kernel_coeff * np.sqrt(squared_distances))
         return self._safe_normalize_distances(distances)
 
+    def _predict_local_outputs(
+        self, X: np.ndarray, local_models: list[LocalModel]
+    ) -> np.ndarray:
+        """Predict local model outputs, using a single matmul for linear models."""
+        if not local_models:
+            return np.zeros((X.shape[0], 0), dtype=X.dtype)
+
+        if all(
+            hasattr(local_model.estimator, "coef_")
+            and hasattr(local_model.estimator, "intercept_")
+            for local_model in local_models
+        ):
+            try:
+                coefs = np.vstack(
+                    [np.ravel(local_model.estimator.coef_) for local_model in local_models]
+                )
+                intercepts = np.array(
+                    [
+                        np.asarray(local_model.estimator.intercept_).reshape(-1)[0]
+                        for local_model in local_models
+                    ],
+                    dtype=coefs.dtype,
+                )
+                return X @ coefs.T + intercepts
+            except Exception:
+                # Fall back to the generic prediction loop if an estimator exposes
+                # coef_/intercept_ in an incompatible format.
+                pass
+
+        predictions = []
+        for i, local_model in enumerate(local_models):
+            try:
+                predictions.append(local_model.estimator.predict(X))
+            except Exception as e:
+                raise RuntimeError(
+                    f"Error predicting with local model {i}: {str(e)}"
+                ) from e
+
+        return np.column_stack(predictions)
+
     def _get_cluster_centers(self, X: np.ndarray) -> np.ndarray:
         r"""
         Select subset centers using the specified clustering method.
@@ -338,23 +378,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             - An array of predictions from each local model.
             - An array of distance-based weights.
         """
-        predictions = []
-        centers = []
-
-        for i, local_model in enumerate(local_models):
-            try:
-                predictions.append(local_model.estimator.predict(X))
-                centers.append(local_model.center)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Error predicting with local model {i}: {str(e)}"
-                ) from e
-
-        if predictions:
-            local_preds = np.column_stack(predictions)
-            center_matrix = np.vstack(centers)
+        local_preds = self._predict_local_outputs(X, local_models)
+        if local_models:
+            center_matrix = np.vstack([local_model.center for local_model in local_models])
         else:
-            local_preds = np.zeros((X.shape[0], 0))
             center_matrix = np.zeros((0, X.shape[1]), dtype=X.dtype)
 
         kernel_coeff = self._get_kernel_coeff(len(local_models))
