@@ -8,7 +8,6 @@ from ._utils import (
 )
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.cluster import KMeans, SpectralClustering
-from sklearn.neighbors import KDTree
 from sklearn.linear_model import LinearRegression
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
@@ -250,6 +249,30 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         distances = np.exp(-kernel_coeff * np.sqrt(squared_distances))
         return self._safe_normalize_distances(distances)
 
+    def _find_neighbor_indices(
+        self, X: np.ndarray, centers: np.ndarray, n_neighbors: int
+    ) -> np.ndarray:
+        """Find exact nearest neighbors with brute-force top-k selection."""
+        n_samples = X.shape[0]
+        if centers.shape[0] == 0 or n_neighbors == 0:
+            return np.zeros((centers.shape[0], 0), dtype=np.intp)
+
+        if n_neighbors >= n_samples:
+            return np.broadcast_to(
+                np.arange(n_samples, dtype=np.intp),
+                (centers.shape[0], n_samples),
+            ).copy()
+
+        x_sq_norms = np.sum(X * X, axis=1)
+        center_sq_norms = np.sum(centers * centers, axis=1, keepdims=True)
+        squared_distances = np.maximum(
+            center_sq_norms + x_sq_norms[np.newaxis, :] - 2.0 * centers @ X.T,
+            0.0,
+        )
+
+        kth = n_neighbors - 1
+        return np.argpartition(squared_distances, kth=kth, axis=1)[:, :n_neighbors]
+
     def _predict_local_outputs(
         self, X: np.ndarray, local_models: list[LocalModel]
     ) -> np.ndarray:
@@ -375,14 +398,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         # Get cluster centers
         centers = self._get_cluster_centers(X)
 
-        # Build KDTree for efficient neighbor search
-        try:
-            tree = KDTree(X)
-        except Exception as e:
-            raise ValueError(f"Error building KDTree: {str(e)}") from e
-
-        # Find neighbors for each center
-        _, neighbor_indices = tree.query(centers, k=self._n_neighbors)
+        # High-dimensional data benefits more from brute-force top-k than tree search.
+        neighbor_indices = self._find_neighbor_indices(X, centers, self._n_neighbors)
 
         local_models = []
 
