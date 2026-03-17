@@ -321,11 +321,21 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         return np.argpartition(squared_distances, kth=kth, axis=1)[:, :n_neighbors]
 
     def _predict_local_outputs(
-        self, X: np.ndarray, local_models: list[LocalModel]
+        self,
+        X: np.ndarray,
+        local_models: list[LocalModel],
+        linear_coefs: Optional[np.ndarray] = None,
+        linear_intercepts: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Predict local model outputs, using a single matmul for linear models."""
         if not local_models:
             return np.zeros((X.shape[0], 0), dtype=X.dtype)
+
+        if linear_coefs is not None and linear_intercepts is not None:
+            return (X @ linear_coefs.T + linear_intercepts).astype(
+                INTERNAL_DTYPE,
+                copy=False,
+            )
 
         if all(
             hasattr(local_model.estimator, "coef_")
@@ -373,6 +383,35 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 ) from e
 
         return np.column_stack(predictions).astype(INTERNAL_DTYPE, copy=False)
+
+    def _get_linear_prediction_params(
+        self, local_models: list[LocalModel]
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Extract coefficient caches for linear-compatible local estimators."""
+        if not local_models:
+            return None, None
+
+        if not all(
+            hasattr(local_model.estimator, "coef_")
+            and hasattr(local_model.estimator, "intercept_")
+            for local_model in local_models
+        ):
+            return None, None
+
+        try:
+            linear_coefs = np.vstack(
+                [np.ravel(local_model.estimator.coef_) for local_model in local_models]
+            ).astype(INTERNAL_DTYPE, copy=False)
+            linear_intercepts = np.array(
+                [
+                    np.asarray(local_model.estimator.intercept_).reshape(-1)[0]
+                    for local_model in local_models
+                ],
+                dtype=INTERNAL_DTYPE,
+            )
+            return linear_coefs, linear_intercepts
+        except Exception:
+            return None, None
 
     def _get_cluster_centers(self, X: np.ndarray) -> np.ndarray:
         r"""
@@ -500,12 +539,15 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         if prediction_data is None:
             return local_models, center_matrix, None, None
 
+        linear_coefs, linear_intercepts = self._get_linear_prediction_params(local_models)
         prediction_x_sq_norms = x_sq_norms if prediction_data is X else None
         predictions, distances = self._predict_with_models(
             prediction_data,
             local_models,
             center_matrix=center_matrix,
             x_sq_norms=prediction_x_sq_norms,
+            linear_coefs=linear_coefs,
+            linear_intercepts=linear_intercepts,
         )
 
         return local_models, center_matrix, predictions, distances
@@ -516,6 +558,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         local_models: list[LocalModel],
         center_matrix: Optional[np.ndarray] = None,
         x_sq_norms: Optional[np.ndarray] = None,
+        linear_coefs: Optional[np.ndarray] = None,
+        linear_intercepts: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         r"""
         Generate predictions from a list of trained local models.
@@ -534,7 +578,12 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             - An array of predictions from each local model.
             - An array of distance-based weights.
         """
-        local_preds = self._predict_local_outputs(X, local_models)
+        local_preds = self._predict_local_outputs(
+            X,
+            local_models,
+            linear_coefs=linear_coefs,
+            linear_intercepts=linear_intercepts,
+        )
         if center_matrix is None and local_models:
             center_matrix = np.vstack([local_model.center for local_model in local_models])
         elif center_matrix is None:
@@ -742,6 +791,8 @@ class LESSBRegressor(BaseLESSRegressor):
         """Reset the internal state of the regressor for refitting."""
         self._local_models_stages = []
         self._local_center_matrices_stages = []
+        self._local_linear_coefs_stages = []
+        self._local_linear_intercepts_stages = []
         self._global_models_stages = []
         self._base_prediction = 0.0
 
@@ -749,6 +800,8 @@ class LESSBRegressor(BaseLESSRegressor):
         self,
         local_models: list[LocalModel],
         center_matrix: np.ndarray,
+        linear_coefs: Optional[np.ndarray],
+        linear_intercepts: Optional[np.ndarray],
         X_train: np.ndarray,
         y_train: np.ndarray,
         X_val: Optional[np.ndarray],
@@ -785,6 +838,8 @@ class LESSBRegressor(BaseLESSRegressor):
                     X_val,
                     local_models,
                     center_matrix=center_matrix,
+                    linear_coefs=linear_coefs,
+                    linear_intercepts=linear_intercepts,
                 )
                 Z_global = distances * local_preds
                 y_global = y_val
@@ -797,6 +852,8 @@ class LESSBRegressor(BaseLESSRegressor):
                         X_train,
                         local_models,
                         center_matrix=center_matrix,
+                        linear_coefs=linear_coefs,
+                        linear_intercepts=linear_intercepts,
                     )
                     Z_global = distances * local_preds
                 else:
@@ -817,7 +874,10 @@ class LESSBRegressor(BaseLESSRegressor):
         X: np.ndarray,
         local_models: list[LocalModel],
         center_matrix: np.ndarray,
+        linear_coefs: Optional[np.ndarray],
+        linear_intercepts: Optional[np.ndarray],
         global_model: Optional[Any],
+        x_sq_norms: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         r"""
         Make predictions for a single boosting stage.
@@ -840,6 +900,9 @@ class LESSBRegressor(BaseLESSRegressor):
             X,
             local_models,
             center_matrix=center_matrix,
+            x_sq_norms=x_sq_norms,
+            linear_coefs=linear_coefs,
+            linear_intercepts=linear_intercepts,
         )
         Z = distances * local_preds
 
@@ -886,6 +949,7 @@ class LESSBRegressor(BaseLESSRegressor):
             dtype=INTERNAL_DTYPE,
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
+        fit_x_sq_norms = np.sum(X * X, axis=1) if self.val_size is not None else None
 
         for stage in range(self.n_estimators):
             try:
@@ -908,6 +972,9 @@ class LESSBRegressor(BaseLESSRegressor):
                 ) = self._build_local_models(
                     X_train, residuals_train, prediction_data=prediction_data
                 )
+                linear_coefs, linear_intercepts = self._get_linear_prediction_params(
+                    local_models
+                )
 
                 if self.val_size is None:
                     if train_local_preds is None or train_distances is None:
@@ -918,6 +985,8 @@ class LESSBRegressor(BaseLESSRegressor):
                     global_model = self._build_stage(
                         local_models,
                         center_matrix,
+                        linear_coefs,
+                        linear_intercepts,
                         X_train,
                         residuals_train,
                         X_val,
@@ -933,6 +1002,8 @@ class LESSBRegressor(BaseLESSRegressor):
                     global_model = self._build_stage(
                         local_models,
                         center_matrix,
+                        linear_coefs,
+                        linear_intercepts,
                         X_train,
                         residuals_train,
                         X_val,
@@ -942,7 +1013,10 @@ class LESSBRegressor(BaseLESSRegressor):
                         X,
                         local_models,
                         center_matrix,
+                        linear_coefs,
+                        linear_intercepts,
                         global_model,
+                        x_sq_norms=fit_x_sq_norms,
                     )
 
                 if not np.all(np.isfinite(stage_predictions)):
@@ -956,6 +1030,8 @@ class LESSBRegressor(BaseLESSRegressor):
 
                 self._local_models_stages.append(local_models)
                 self._local_center_matrices_stages.append(center_matrix)
+                self._local_linear_coefs_stages.append(linear_coefs)
+                self._local_linear_intercepts_stages.append(linear_intercepts)
                 self._global_models_stages.append(global_model)
 
                 mean_abs_residual = np.mean(np.abs(y - current_predictions))
@@ -1014,18 +1090,24 @@ class LESSBRegressor(BaseLESSRegressor):
             dtype=INTERNAL_DTYPE,
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
+        x_sq_norms = np.sum(X * X, axis=1)
 
         # Add predictions from specified number of stages
         for stage in range(n_rounds):
             try:
                 local_models = self._local_models_stages[stage]
                 center_matrix = self._local_center_matrices_stages[stage]
+                linear_coefs = self._local_linear_coefs_stages[stage]
+                linear_intercepts = self._local_linear_intercepts_stages[stage]
                 global_model = self._global_models_stages[stage]
                 stage_predictions = self._predict_stage(
                     X,
                     local_models,
                     center_matrix,
+                    linear_coefs,
+                    linear_intercepts,
                     global_model,
+                    x_sq_norms=x_sq_norms,
                 )
 
                 # Validate stage predictions
@@ -1116,6 +1198,8 @@ class LESSARegressor(BaseLESSRegressor):
         """Reset the internal state of the regressor for refitting."""
         self._local_models_iterations = []
         self._local_center_matrices_iterations = []
+        self._local_linear_coefs_iterations = []
+        self._local_linear_intercepts_iterations = []
         self._global_models_iterations = []
 
     def fit(
@@ -1159,6 +1243,9 @@ class LESSARegressor(BaseLESSRegressor):
                 local_models, center_matrix, train_preds, train_dists = self._build_local_models(
                     X_train, y_train, prediction_data=prediction_data
                 )
+                linear_coefs, linear_intercepts = self._get_linear_prediction_params(
+                    local_models
+                )
 
                 global_est = None
                 if self._global_estimator_factory is not None:
@@ -1167,6 +1254,8 @@ class LESSARegressor(BaseLESSRegressor):
                             X_val,
                             local_models,
                             center_matrix=center_matrix,
+                            linear_coefs=linear_coefs,
+                            linear_intercepts=linear_intercepts,
                         )
                         Z_global = val_dists * val_preds
                         y_global = y_val
@@ -1183,6 +1272,8 @@ class LESSARegressor(BaseLESSRegressor):
 
                 self._local_models_iterations.append(local_models)
                 self._local_center_matrices_iterations.append(center_matrix)
+                self._local_linear_coefs_iterations.append(linear_coefs)
+                self._local_linear_intercepts_iterations.append(linear_intercepts)
                 self._global_models_iterations.append(global_est)
 
             except Exception as e:
@@ -1234,11 +1325,14 @@ class LESSARegressor(BaseLESSRegressor):
 
         # Collect predictions from all iterations
         all_predictions = []
+        x_sq_norms = np.sum(X * X, axis=1)
 
         for iteration in range(n_estimators):
             try:
                 local_models = self._local_models_iterations[iteration]
                 center_matrix = self._local_center_matrices_iterations[iteration]
+                linear_coefs = self._local_linear_coefs_iterations[iteration]
+                linear_intercepts = self._local_linear_intercepts_iterations[iteration]
                 global_model = self._global_models_iterations[iteration]
 
                 # Get local predictions and distances
@@ -1246,6 +1340,9 @@ class LESSARegressor(BaseLESSRegressor):
                     X,
                     local_models,
                     center_matrix=center_matrix,
+                    x_sq_norms=x_sq_norms,
+                    linear_coefs=linear_coefs,
+                    linear_intercepts=linear_intercepts,
                 )
 
                 # Create features
