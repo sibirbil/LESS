@@ -13,13 +13,15 @@ from sklearn.linear_model import LinearRegression
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
 from threadpoolctl import threadpool_limits
-from xgboost import DMatrix, XGBRFRegressor, train as xgb_train
+from xgboost import DMatrix, train as xgb_train
 
 INTERNAL_DTYPE = np.float32
 
 
 class _NativeXGBoostRegressor:
-    """Minimal regressor wrapper around xgboost.train with DMatrix caching."""
+    """Lightweight sklearn-compatible wrapper around xgboost.train."""
+
+    __slots__ = ("params", "num_boost_round", "_booster")
 
     def __init__(self, params: dict[str, Any], num_boost_round: int = 1):
         self.params = params
@@ -38,7 +40,6 @@ class _NativeXGBoostRegressor:
     def predict(self, X: Union[np.ndarray, DMatrix]) -> np.ndarray:
         if self._booster is None:
             raise ValueError("Model is not fitted")
-
         dmatrix = X if isinstance(X, DMatrix) else DMatrix(X)
         return self._booster.predict(dmatrix)
 
@@ -61,8 +62,9 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         returns a scikit-learn compatible regressor instance.
     global_estimator : str or callable or None, default='xgboost'
         The global meta-estimator that combines the predictions of local models.
-        Can be a string ('xgboost'), None (for simple averaging), or a
-        callable that returns a scikit-learn compatible regressor.
+        Can be a string ('xgboost', implemented as a native XGBoost random forest),
+        None (for simple averaging), or a callable that returns a scikit-learn
+        compatible regressor.
     cluster_method : str or callable, default='tree'
         The method for selecting subset centers. 'tree' uses random sampling,
         while 'kmeans' and 'spectral' use clustering. A callable can be
@@ -118,8 +120,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
         _validate_static_hyperparameters(self)
 
-        self._native_global_xgb_base_params = (
-            self._build_native_global_xgboost_base_params()
+        self._native_global_xgb_rf_base_params = (
+            self._build_native_global_xgboost_rf_base_params()
         )
 
         # Initialize random generator
@@ -131,10 +133,23 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             return lambda: LinearRegression()
         elif self.local_estimator == "tree":
             return lambda: _NativeXGBoostRegressor(
-                params=self._get_native_local_xgboost_params(
-                    self._rng.randint(2**31)
-                ),
-                num_boost_round=1,
+                params={
+                    "tree_method": "hist",
+                    "grow_policy": "lossguide",
+                    "max_leaves": 31,
+                    "max_depth": 0,
+                    "objective": "reg:squarederror",
+                    "learning_rate": 1.0,
+                    "gamma": 0.0,
+                    "min_child_weight": 2.0,
+                    "subsample": 1.0,
+                    "colsample_bytree": 1.0,
+                    "reg_lambda": 0.0,
+                    "reg_alpha": 0.0,
+                    "nthread": 1,
+                    "verbosity": 0,
+                    "seed": self._rng.randint(2**31),
+                },
             )
         elif callable(self.local_estimator):
             return self.local_estimator
@@ -144,11 +159,9 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_global_estimator_factory(self) -> Optional[Callable[[], Any]]:
         """Get the factory function for creating the global estimator instance."""
         if self.global_estimator == "xgboost":
+            base = self._native_global_xgb_rf_base_params
             return lambda: _NativeXGBoostRegressor(
-                params=self._get_native_xgboost_params(
-                    self._rng.randint(2**31)
-                ),
-                num_boost_round=1,
+                params={**base, "seed": self._rng.randint(2**31)},
             )
         elif self.global_estimator is None:
             return None
@@ -157,60 +170,18 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         else:
             raise ValueError(f"Invalid global_estimator: {self.global_estimator}")
 
-    def _get_native_xgboost_params(self, random_state: int) -> dict[str, Any]:
-        """Mirror the current XGBRFRegressor defaults for the native train API."""
-        params = self._native_global_xgb_base_params.copy()
-        params["seed"] = random_state
-        return params
-
-    def _build_native_global_xgboost_base_params(self) -> dict[str, Any]:
-        """Build the native XGBoost param template once and reuse it."""
-        wrapper_params = XGBRFRegressor(
-            n_estimators=25,
-            random_state=0,
-            verbosity=0,
-        ).get_xgb_params()
-
-        params = self._to_native_xgboost_params(wrapper_params)
-        params.pop("seed", None)
-        return params
-
-    def _get_native_local_xgboost_params(self, random_state: int) -> dict[str, Any]:
-        """Native params for the local single-tree XGBoost estimator."""
+    def _build_native_global_xgboost_rf_base_params(self) -> dict[str, Any]:
+        """Build native XGBoost params for standalone random forest training."""
         return {
-            "tree_method": "hist",
-            "grow_policy": "lossguide",
-            "max_leaves": 31,
-            "max_depth": 0,
+            "booster": "gbtree",
             "objective": "reg:squarederror",
             "learning_rate": 1.0,
-            "gamma": 0.0,
-            "min_child_weight": 2.0,
-            "subsample": 1.0,
-            "colsample_bytree": 1.0,
-            "reg_lambda": 0.0,
-            "reg_alpha": 0.0,
-            "nthread": 1,
+            "num_parallel_tree": 25,
+            "subsample": 0.8,
+            "colsample_bynode": 0.8,
+            "reg_lambda": 1e-5,
             "verbosity": 0,
-            "seed": random_state,
         }
-
-    def _to_native_xgboost_params(
-        self, wrapper_params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Convert sklearn-style XGBoost params to native train params."""
-        params = {}
-        for key, value in wrapper_params.items():
-            if value is None:
-                continue
-            if key == "random_state":
-                params["seed"] = value
-            elif key == "n_jobs":
-                params["nthread"] = value
-            else:
-                params[key] = value
-
-        return params
 
     def _safe_normalize_distances(self, distances: np.ndarray) -> np.ndarray:
         r"""
@@ -352,6 +323,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 # coef_/intercept_ in an incompatible format.
                 pass
 
+        # Build a shared DMatrix once when all local models are native XGBoost.
         predictions = []
         if all(
             isinstance(local_model.estimator, _NativeXGBoostRegressor)
@@ -359,18 +331,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         ):
             if shared_dmatrix is None:
                 shared_dmatrix = DMatrix(X)
-            for i, local_model in enumerate(local_models):
-                try:
-                    predictions.append(local_model.estimator.predict(shared_dmatrix))
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Error predicting with local model {i}: {str(e)}"
-                    ) from e
-            return np.column_stack(predictions).astype(INTERNAL_DTYPE, copy=False)
+            predict_input = shared_dmatrix
+        else:
+            predict_input = X
 
         for i, local_model in enumerate(local_models):
             try:
-                predictions.append(local_model.estimator.predict(X))
+                predictions.append(local_model.estimator.predict(predict_input))
             except Exception as e:
                 raise RuntimeError(
                     f"Error predicting with local model {i}: {str(e)}"
@@ -563,7 +530,6 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         try:
             X_local = X[neighbors]
             y_local = y[neighbors]
-
             center = np.mean(X_local, axis=0)
             local_estimator.fit(X_local, y_local)
             return LocalModel(local_estimator, center), center
@@ -751,6 +717,7 @@ class LESSBRegressor(BaseLESSRegressor):
         The local estimator for modeling data subsets.
     global_estimator : str or callable or None, default='xgboost'
         The global meta-estimator for combining local model predictions.
+        The built-in 'xgboost' option uses a native XGBoost random forest.
     cluster_method : str or callable, default='tree'
         The method for selecting subset centers.
     val_size : float, optional
@@ -931,14 +898,8 @@ class LESSBRegressor(BaseLESSRegressor):
         Z = distances * local_preds
 
         if global_model is not None:
-            try:
-                return global_model.predict(Z)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Error predicting with global model: {str(e)}"
-                ) from e
-        else:
-            return np.sum(Z, axis=1)
+            return global_model.predict(Z)
+        return np.sum(Z, axis=1)
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
@@ -1177,6 +1138,7 @@ class LESSARegressor(BaseLESSRegressor):
         The local estimator for modeling data subsets.
     global_estimator : str or callable or None, default='xgboost'
         The global meta-estimator for combining local model predictions.
+        The built-in 'xgboost' option uses a native XGBoost random forest.
     cluster_method : str or callable, default='tree'
         The method for selecting subset centers.
     val_size : float, optional
@@ -1388,11 +1350,9 @@ class LESSARegressor(BaseLESSRegressor):
                 # Create features
                 Z = distances * local_preds
 
-                # Predict based on whether global model exists
                 if global_model is not None:
                     iteration_predictions = global_model.predict(Z)
                 else:
-                    # Simple sum of weighted predictions
                     iteration_predictions = np.sum(Z, axis=1)
 
                 # Validate predictions
