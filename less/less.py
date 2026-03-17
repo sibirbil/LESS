@@ -801,7 +801,7 @@ class LESSBRegressor(BaseLESSRegressor):
         val_size: Optional[float] = None,
         kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
-        local_n_jobs: int = 1,
+        local_n_jobs: int = -1,
         early_stopping_tolerance: float = 1e-8,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
@@ -1222,7 +1222,7 @@ class LESSARegressor(BaseLESSRegressor):
         val_size: Optional[float] = None,
         kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
-        local_n_jobs: int = 1,
+        local_n_jobs: int = -1,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
         super().__init__(
