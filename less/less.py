@@ -185,16 +185,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
     def _safe_normalize_distances(self, distances: np.ndarray) -> np.ndarray:
         r"""
-        Safely normalize distance weights to avoid numerical instabilities.
-
-        The method normalizes the distances so that each row sums to 1. It handles
-        cases where the sum of distances in a row is close to zero by
-        assigning a uniform weight to prevent division by zero.
+        Safely normalize distance weights in-place to avoid extra allocations.
 
         Parameters
         ----------
         distances : np.ndarray of shape (n_samples, n_subsets)
             The raw distance weights calculated from the RBF kernel.
+            **Modified in-place** and returned.
 
         Returns
         -------
@@ -204,24 +201,16 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         if distances.shape[0] == 0:
             return distances
 
-        # Calculate row sums with numerical stability
         distance_sums = np.sum(distances, axis=1, keepdims=True)
 
-        # Handle edge cases where all distances are very small
         zero_mask = distance_sums.flatten() < 1e-12
-
         if np.any(zero_mask):
-            # Use uniform distribution for problematic rows
             uniform_weight = 1.0 / distances.shape[1]
             distances[zero_mask] = uniform_weight
             distance_sums[zero_mask] = 1.0
 
-        return np.divide(
-            distances,
-            distance_sums,
-            out=np.zeros_like(distances),
-            where=distance_sums != 0,
-        )
+        np.divide(distances, distance_sums, out=distances)
+        return distances
 
     def _get_kernel_coeff(self, n_subsets: int) -> float:
         """Resolve the effective kernel coefficient for the given subset count."""
@@ -236,21 +225,26 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         kernel_coeff: float,
         x_sq_norms: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Compute all RBF distances in one vectorized pass."""
+        """Compute all RBF distances in one vectorized pass (in-place)."""
         if X.shape[0] == 0 or centers.shape[0] == 0:
             return np.zeros((X.shape[0], centers.shape[0]), dtype=X.dtype)
 
         if x_sq_norms is None:
-            x_sq_norms = np.sum(X * X, axis=1)
+            x_sq_norms = np.einsum("ij,ij->i", X, X)
 
-        x_sq_norms = np.asarray(x_sq_norms, dtype=X.dtype).reshape(-1, 1)
-        center_sq_norms = np.sum(centers * centers, axis=1, keepdims=True).T
-        squared_distances = np.maximum(
-            x_sq_norms + center_sq_norms - 2.0 * X @ centers.T,
-            0.0,
-        )
-        distances = np.exp(-kernel_coeff * np.sqrt(squared_distances))
-        return self._safe_normalize_distances(distances)
+        x_sq_col = np.asarray(x_sq_norms, dtype=X.dtype).reshape(-1, 1)
+        center_sq_row = np.einsum("ij,ij->i", centers, centers)[np.newaxis, :]
+
+        # Build squared distances in a single buffer
+        dist = np.dot(X, centers.T)          # (n_samples, n_subsets)
+        dist *= -2.0
+        dist += x_sq_col
+        dist += center_sq_row
+        np.maximum(dist, 0.0, out=dist)
+        np.sqrt(dist, out=dist)
+        dist *= -kernel_coeff
+        np.exp(dist, out=dist)
+        return self._safe_normalize_distances(dist)
 
     def _find_neighbor_indices(
         self,
@@ -259,7 +253,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         n_neighbors: int,
         x_sq_norms: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Find exact nearest neighbors with brute-force top-k selection."""
+        """Find exact nearest neighbors with brute-force top-k (in-place)."""
         n_samples = X.shape[0]
         if centers.shape[0] == 0 or n_neighbors == 0:
             return np.zeros((centers.shape[0], 0), dtype=np.intp)
@@ -271,17 +265,20 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             ).copy()
 
         if x_sq_norms is None:
-            x_sq_norms = np.sum(X * X, axis=1)
+            x_sq_norms = np.einsum("ij,ij->i", X, X)
 
         x_sq_norms = np.asarray(x_sq_norms, dtype=X.dtype)
-        center_sq_norms = np.sum(centers * centers, axis=1, keepdims=True)
-        squared_distances = np.maximum(
-            center_sq_norms + x_sq_norms[np.newaxis, :] - 2.0 * centers @ X.T,
-            0.0,
-        )
+        center_sq_norms = np.einsum("ij,ij->i", centers, centers).reshape(-1, 1)
+
+        # Build squared distances in a single buffer
+        sq_dist = np.dot(centers, X.T)        # (n_subsets, n_samples)
+        sq_dist *= -2.0
+        sq_dist += center_sq_norms
+        sq_dist += x_sq_norms[np.newaxis, :]
+        np.maximum(sq_dist, 0.0, out=sq_dist)
 
         kth = n_neighbors - 1
-        return np.argpartition(squared_distances, kth=kth, axis=1)[:, :n_neighbors]
+        return np.argpartition(sq_dist, kth=kth, axis=1)[:, :n_neighbors]
 
     def _predict_local_outputs(
         self,
@@ -295,12 +292,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         if not local_models:
             return np.zeros((X.shape[0], 0), dtype=X.dtype)
 
+        # Fast path: cached linear coefficients (in-place add)
         if linear_coefs is not None and linear_intercepts is not None:
-            return (X @ linear_coefs.T + linear_intercepts).astype(
-                INTERNAL_DTYPE,
-                copy=False,
-            )
+            out = np.dot(X, linear_coefs.T)
+            out += linear_intercepts
+            return out.astype(INTERNAL_DTYPE, copy=False)
 
+        # Fallback: extract coef_/intercept_ on the fly
         if all(
             hasattr(local_model.estimator, "coef_")
             and hasattr(local_model.estimator, "intercept_")
@@ -317,14 +315,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                     ],
                     dtype=coefs.dtype,
                 )
-                return (X @ coefs.T + intercepts).astype(INTERNAL_DTYPE, copy=False)
+                out = np.dot(X, coefs.T)
+                out += intercepts
+                return out.astype(INTERNAL_DTYPE, copy=False)
             except Exception:
-                # Fall back to the generic prediction loop if an estimator exposes
-                # coef_/intercept_ in an incompatible format.
                 pass
 
-        # Build a shared DMatrix once when all local models are native XGBoost.
-        predictions = []
+        # Generic path: pre-allocate output, fill columns (no list+column_stack)
         if all(
             isinstance(local_model.estimator, _NativeXGBoostRegressor)
             for local_model in local_models
@@ -335,15 +332,17 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         else:
             predict_input = X
 
+        n_models = len(local_models)
+        out = np.empty((X.shape[0], n_models), dtype=INTERNAL_DTYPE)
         for i, local_model in enumerate(local_models):
             try:
-                predictions.append(local_model.estimator.predict(predict_input))
+                out[:, i] = local_model.estimator.predict(predict_input)
             except Exception as e:
                 raise RuntimeError(
                     f"Error predicting with local model {i}: {str(e)}"
                 ) from e
 
-        return np.column_stack(predictions).astype(INTERNAL_DTYPE, copy=False)
+        return out
 
     def _get_linear_prediction_params(
         self, local_models: list[LocalModel]
@@ -459,7 +458,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         """
         # Get cluster centers
         centers = self._get_cluster_centers(X)
-        x_sq_norms = np.sum(X * X, axis=1)
+        x_sq_norms = np.einsum("ij,ij->i", X, X)
 
         # High-dimensional data benefits more from brute-force top-k than tree search.
         neighbor_indices = self._find_neighbor_indices(
@@ -795,7 +794,6 @@ class LESSBRegressor(BaseLESSRegressor):
         y_train: np.ndarray,
         X_val: Optional[np.ndarray],
         y_val: Optional[np.ndarray],
-        cached_train_outputs: Optional[tuple[np.ndarray, np.ndarray]] = None,
         cached_train_features: Optional[np.ndarray] = None,
     ) -> Optional[Any]:
         r"""
@@ -830,13 +828,14 @@ class LESSBRegressor(BaseLESSRegressor):
                     linear_coefs=linear_coefs,
                     linear_intercepts=linear_intercepts,
                 )
-                Z_global = distances * local_preds
+                np.multiply(distances, local_preds, out=distances)
+                Z_global = distances
                 y_global = y_val
             # Otherwise, train global model on the training set predictions
             else:
                 if cached_train_features is not None:
                     Z_global = cached_train_features
-                elif cached_train_outputs is None:
+                else:
                     local_preds, distances = self._predict_with_models(
                         X_train,
                         local_models,
@@ -844,10 +843,8 @@ class LESSBRegressor(BaseLESSRegressor):
                         linear_coefs=linear_coefs,
                         linear_intercepts=linear_intercepts,
                     )
-                    Z_global = distances * local_preds
-                else:
-                    local_preds, distances = cached_train_outputs
-                    Z_global = distances * local_preds
+                    np.multiply(distances, local_preds, out=distances)
+                    Z_global = distances
                 y_global = y_train
 
             try:
@@ -895,11 +892,12 @@ class LESSBRegressor(BaseLESSRegressor):
             linear_intercepts=linear_intercepts,
             shared_dmatrix=shared_dmatrix,
         )
-        Z = distances * local_preds
+        # Z = distances * local_preds, reuse distances buffer
+        np.multiply(distances, local_preds, out=distances)
 
         if global_model is not None:
-            return global_model.predict(Z)
-        return np.sum(Z, axis=1)
+            return global_model.predict(distances)
+        return np.sum(distances, axis=1)
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
@@ -934,11 +932,14 @@ class LESSBRegressor(BaseLESSRegressor):
             dtype=INTERNAL_DTYPE,
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
-        fit_x_sq_norms = np.sum(X * X, axis=1) if self.val_size is not None else None
+        fit_x_sq_norms = (
+            np.einsum("ij,ij->i", X, X) if self.val_size is not None else None
+        )
+        residuals = np.empty_like(y)
 
         for stage in range(self.n_estimators):
             try:
-                residuals = y - current_predictions
+                np.subtract(y, current_predictions, out=residuals)
 
                 if self.val_size is not None:
                     X_train, X_val, residuals_train, residuals_val = train_test_split(
@@ -966,7 +967,11 @@ class LESSBRegressor(BaseLESSRegressor):
                         raise RuntimeError(
                             "Training predictions were not computed for the stage"
                         )
-                    Z_stage = train_distances * train_local_preds
+                    # Z in-place into train_distances buffer
+                    np.multiply(
+                        train_distances, train_local_preds, out=train_distances
+                    )
+                    Z_stage = train_distances
                     global_model = self._build_stage(
                         local_models,
                         center_matrix,
@@ -974,9 +979,8 @@ class LESSBRegressor(BaseLESSRegressor):
                         linear_intercepts,
                         X_train,
                         residuals_train,
-                        X_val,
-                        residuals_val,
-                        cached_train_outputs=(train_local_preds, train_distances),
+                        None,
+                        None,
                         cached_train_features=Z_stage,
                     )
                     if global_model is not None:
@@ -1011,7 +1015,9 @@ class LESSBRegressor(BaseLESSRegressor):
                     )
                     continue
 
-                current_predictions += learning_rate * stage_predictions
+                # In-place accumulation: avoid temp from learning_rate * stage_predictions
+                stage_predictions *= learning_rate
+                current_predictions += stage_predictions
 
                 self._local_models_stages.append(local_models)
                 self._local_center_matrices_stages.append(center_matrix)
@@ -1019,7 +1025,9 @@ class LESSBRegressor(BaseLESSRegressor):
                 self._local_linear_intercepts_stages.append(linear_intercepts)
                 self._global_models_stages.append(global_model)
 
-                mean_abs_residual = np.mean(np.abs(y - current_predictions))
+                # Reuse pre-allocated residuals for early stopping check
+                np.subtract(y, current_predictions, out=residuals)
+                mean_abs_residual = np.mean(np.abs(residuals))
                 if mean_abs_residual < self.early_stopping_tolerance and stage > 0:
                     break
 
@@ -1075,7 +1083,7 @@ class LESSBRegressor(BaseLESSRegressor):
             dtype=INTERNAL_DTYPE,
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
-        x_sq_norms = np.sum(X * X, axis=1)
+        x_sq_norms = np.einsum("ij,ij->i", X, X)
         shared_dmatrix = None
 
         # Add predictions from specified number of stages
@@ -1102,9 +1110,9 @@ class LESSBRegressor(BaseLESSRegressor):
                     shared_dmatrix=shared_dmatrix,
                 )
 
-                # Validate stage predictions
                 if np.all(np.isfinite(stage_predictions)):
-                    predictions += learning_rate * stage_predictions
+                    stage_predictions *= learning_rate
+                    predictions += stage_predictions
                 else:
                     warnings.warn(
                         f"Non-finite predictions in stage {stage}, skipping",
@@ -1252,14 +1260,16 @@ class LESSARegressor(BaseLESSRegressor):
                             linear_coefs=linear_coefs,
                             linear_intercepts=linear_intercepts,
                         )
-                        Z_global = val_dists * val_preds
+                        np.multiply(val_dists, val_preds, out=val_dists)
+                        Z_global = val_dists
                         y_global = y_val
                     else:
                         if train_preds is None or train_dists is None:
                             raise RuntimeError(
                                 "Training predictions were not computed for the global estimator"
                             )
-                        Z_global = train_dists * train_preds
+                        np.multiply(train_dists, train_preds, out=train_dists)
+                        Z_global = train_dists
                         y_global = y_train
 
                     global_est = self._global_estimator_factory()
@@ -1320,7 +1330,7 @@ class LESSARegressor(BaseLESSRegressor):
 
         prediction_sum = np.zeros(n_samples, dtype=INTERNAL_DTYPE)
         valid_prediction_count = 0
-        x_sq_norms = np.sum(X * X, axis=1)
+        x_sq_norms = np.einsum("ij,ij->i", X, X)
         shared_dmatrix = None
 
         for iteration in range(n_estimators):
@@ -1336,7 +1346,6 @@ class LESSARegressor(BaseLESSRegressor):
                 ):
                     shared_dmatrix = DMatrix(X)
 
-                # Get local predictions and distances
                 local_preds, distances = self._predict_with_models(
                     X,
                     local_models,
@@ -1347,13 +1356,13 @@ class LESSARegressor(BaseLESSRegressor):
                     shared_dmatrix=shared_dmatrix,
                 )
 
-                # Create features
-                Z = distances * local_preds
+                # Z in-place into distances buffer
+                np.multiply(distances, local_preds, out=distances)
 
                 if global_model is not None:
-                    iteration_predictions = global_model.predict(Z)
+                    iteration_predictions = global_model.predict(distances)
                 else:
-                    iteration_predictions = np.sum(Z, axis=1)
+                    iteration_predictions = np.sum(distances, axis=1)
 
                 # Validate predictions
                 if np.all(np.isfinite(iteration_predictions)):
