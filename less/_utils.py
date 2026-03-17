@@ -59,6 +59,11 @@ def _validate_static_hyperparameters(self) -> None:
             f"min_neighbors must be a positive integer, got {self.min_neighbors}"
         )
 
+    if not isinstance(self.local_n_jobs, int) or self.local_n_jobs == 0:
+        raise ValueError(
+            f"local_n_jobs must be a non-zero integer, got {self.local_n_jobs}"
+        )
+
     if hasattr(self, "early_stopping_tolerance") and (
         not isinstance(self.early_stopping_tolerance, (float, int))
         or self.early_stopping_tolerance < 0

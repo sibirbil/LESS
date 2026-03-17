@@ -1,6 +1,7 @@
 import warnings
 from typing import Optional, Callable, Union, Any
 import numpy as np
+from joblib import Parallel, delayed
 from ._utils import (
     LocalModel,
     _validate_static_hyperparameters,
@@ -11,6 +12,7 @@ from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.linear_model import LinearRegression
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
+from threadpoolctl import threadpool_limits
 from xgboost import DMatrix, XGBRFRegressor, train as xgb_train
 
 INTERNAL_DTYPE = np.float32
@@ -113,6 +115,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         val_size: Optional[float] = None,
         kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
+        local_n_jobs: int = 1,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
         self.n_subsets = n_subsets
@@ -122,6 +125,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         self.val_size = val_size
         self.kernel_coeff = kernel_coeff
         self.min_neighbors = min_neighbors
+        self.local_n_jobs = local_n_jobs
         self.random_state = random_state
 
         _validate_static_hyperparameters(self)
@@ -511,25 +515,30 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         local_models = []
         local_centers = []
 
+        local_estimators = [
+            self._local_estimator_factory() for _ in range(len(neighbor_indices))
+        ]
+
         # Train local models
-        for i, neighbors in enumerate(neighbor_indices):
-            try:
-                X_local = X[neighbors]
-                y_local = y[neighbors]
+        if self.local_n_jobs == 1 or len(neighbor_indices) <= 1:
+            results = [
+                self._fit_single_local_model(local_est, X, y, neighbors, i)
+                for i, (local_est, neighbors) in enumerate(
+                    zip(local_estimators, neighbor_indices)
+                )
+            ]
+        else:
+            with threadpool_limits(limits=1):
+                results = Parallel(n_jobs=self.local_n_jobs, prefer="threads")(
+                    delayed(self._fit_single_local_model)(local_est, X, y, neighbors, i)
+                    for i, (local_est, neighbors) in enumerate(
+                        zip(local_estimators, neighbor_indices)
+                    )
+                )
 
-                # Calculate subset center
-                center = np.mean(X_local, axis=0)
-
-                # Create and train local estimator
-                local_est = self._local_estimator_factory()
-                local_est.fit(X_local, y_local)
-
-                # Store model
-                local_models.append(LocalModel(local_est, center))
-                local_centers.append(center)
-
-            except Exception as e:
-                raise RuntimeError(f"Error training local model {i}: {str(e)}") from e
+        for local_model, center in results:
+            local_models.append(local_model)
+            local_centers.append(center)
 
         if local_centers:
             center_matrix = np.vstack(local_centers).astype(INTERNAL_DTYPE, copy=False)
@@ -551,6 +560,25 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         )
 
         return local_models, center_matrix, predictions, distances
+
+    def _fit_single_local_model(
+        self,
+        local_estimator: Any,
+        X: np.ndarray,
+        y: np.ndarray,
+        neighbors: np.ndarray,
+        index: int,
+    ) -> tuple[LocalModel, np.ndarray]:
+        """Fit a single local estimator for a subset."""
+        try:
+            X_local = X[neighbors]
+            y_local = y[neighbors]
+
+            center = np.mean(X_local, axis=0)
+            local_estimator.fit(X_local, y_local)
+            return LocalModel(local_estimator, center), center
+        except Exception as e:
+            raise RuntimeError(f"Error training local model {index}: {str(e)}") from e
 
     def _predict_with_models(
         self,
@@ -769,6 +797,7 @@ class LESSBRegressor(BaseLESSRegressor):
         val_size: Optional[float] = None,
         kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
+        local_n_jobs: int = 1,
         early_stopping_tolerance: float = 1e-8,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
@@ -780,6 +809,7 @@ class LESSBRegressor(BaseLESSRegressor):
             val_size=val_size,
             kernel_coeff=kernel_coeff,
             min_neighbors=min_neighbors,
+            local_n_jobs=local_n_jobs,
             random_state=random_state,
         )
 
@@ -1179,6 +1209,7 @@ class LESSARegressor(BaseLESSRegressor):
         val_size: Optional[float] = None,
         kernel_coeff: Optional[float] = 0.1,
         min_neighbors: int = 10,
+        local_n_jobs: int = 1,
         random_state: Optional[Union[int, np.random.RandomState]] = None,
     ):
         super().__init__(
@@ -1189,6 +1220,7 @@ class LESSARegressor(BaseLESSRegressor):
             val_size=val_size,
             kernel_coeff=kernel_coeff,
             min_neighbors=min_neighbors,
+            local_n_jobs=local_n_jobs,
             random_state=random_state,
         )
 
