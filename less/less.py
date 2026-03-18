@@ -553,13 +553,22 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 X_local = X[neighbors]
                 y_local = y[neighbors]
             center = np.mean(X_local, axis=0)
-            # Linear solvers benefit from float64 precision to avoid
-            # ill-conditioned SVD / Cholesky failures on float32 subsets.
             if isinstance(local_estimator, (LinearRegression, Ridge)):
-                local_estimator.fit(
-                    np.asarray(X_local, dtype=np.float64),
-                    np.asarray(y_local, dtype=np.float64),
-                )
+                # Scale in-place to fix conditioning; un-scale coefs after fit.
+                std = np.std(X_local, axis=0)
+                # Mask for constant / near-constant features:
+                # leave them unscaled (std=1) so coef stays 0 after fit.
+                safe = std > 1e-7
+                std[~safe] = 1.0
+                X_local -= center
+                X_local /= std
+                local_estimator.fit(X_local, y_local)
+                # Un-scale only the features that were actually scaled.
+                coef = np.asarray(local_estimator.coef_).ravel()
+                coef[safe] /= std[safe]
+                coef[~safe] = 0.0
+                local_estimator.coef_ = coef
+                local_estimator.intercept_ -= coef @ center
             else:
                 local_estimator.fit(X_local, y_local)
             return LocalModel(local_estimator, center), center
