@@ -9,7 +9,7 @@ from ._utils import (
 )
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.cluster import KMeans, SpectralClustering
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
 from threadpoolctl import threadpool_limits
@@ -130,7 +130,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_local_estimator_factory(self) -> Callable[[], Any]:
         """Get the factory function for creating local estimator instances."""
         if self.local_estimator == "linear":
-            return lambda: LinearRegression()
+            return lambda: Ridge(alpha=1e-10)
         elif self.local_estimator == "tree":
             return lambda: _NativeXGBoostRegressor(
                 params={
@@ -433,28 +433,16 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         X: np.ndarray,
         y: np.ndarray,
         prediction_data: Optional[np.ndarray] = None,
-    ) -> tuple[list[LocalModel], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> tuple[list[LocalModel], np.ndarray, Optional[np.ndarray]]:
         r"""
         Build local models for one stage of the algorithm.
 
-        This method selects subset centers, finds their nearest neighbors, and
-        trains a local estimator for each subset.
-
-        Parameters
-        ----------
-        X : np.ndarray
-            The training features.
-        y : np.ndarray
-            The target values or residuals for boosting.
-
         Returns
         -------
-        tuple[list[LocalModel], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]
-            A tuple containing:
+        tuple[list[LocalModel], np.ndarray, Optional[np.ndarray]]
             - A list of trained `LocalModel` instances.
-            - An array containing the center matrix of local models.
-            - An optional array of predictions from each local model.
-            - An optional array of distance-based weights for each sample.
+            - The center matrix of local models.
+            - The weighted feature matrix Z (if *prediction_data* is given).
         """
         # Get cluster centers
         centers = self._get_cluster_centers(X)
