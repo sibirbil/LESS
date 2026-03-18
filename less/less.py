@@ -130,7 +130,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_local_estimator_factory(self) -> Callable[[], Any]:
         """Get the factory function for creating local estimator instances."""
         if self.local_estimator == "linear":
-            return lambda: Ridge(alpha=1e-8, copy_X=False)
+            return lambda: Ridge(alpha=1e-6, copy_X=False)
         elif self.local_estimator == "tree":
             return lambda: _NativeXGBoostRegressor(
                 params={
@@ -562,7 +562,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 std[~safe] = 1.0
                 X_local -= center
                 X_local /= std
-                local_estimator.fit(X_local, y_local)
+                local_estimator.fit(
+                    np.asarray(X_local, dtype=np.float64),
+                    np.asarray(y_local, dtype=np.float64),
+                )
                 # Un-scale only the features that were actually scaled.
                 coef = np.asarray(local_estimator.coef_).ravel()
                 coef[safe] /= std[safe]
