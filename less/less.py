@@ -9,7 +9,7 @@ from ._utils import (
 )
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.cluster import KMeans, SpectralClustering
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
 from threadpoolctl import threadpool_limits
@@ -130,7 +130,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_local_estimator_factory(self) -> Callable[[], Any]:
         """Get the factory function for creating local estimator instances."""
         if self.local_estimator == "linear":
-            return lambda: Ridge(alpha=1.0)
+            return lambda: Ridge(alpha=1e-8, copy_X=False)
         elif self.local_estimator == "tree":
             return lambda: _NativeXGBoostRegressor(
                 params={
@@ -553,7 +553,15 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 X_local = X[neighbors]
                 y_local = y[neighbors]
             center = np.mean(X_local, axis=0)
-            local_estimator.fit(X_local, y_local)
+            # Linear solvers benefit from float64 precision to avoid
+            # ill-conditioned SVD / Cholesky failures on float32 subsets.
+            if isinstance(local_estimator, (LinearRegression, Ridge)):
+                local_estimator.fit(
+                    np.asarray(X_local, dtype=np.float64),
+                    np.asarray(y_local, dtype=np.float64),
+                )
+            else:
+                local_estimator.fit(X_local, y_local)
             return LocalModel(local_estimator, center), center
         except Exception as e:
             raise RuntimeError(f"Error training local model {index}: {str(e)}") from e
