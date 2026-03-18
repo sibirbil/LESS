@@ -130,7 +130,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def _get_local_estimator_factory(self) -> Callable[[], Any]:
         """Get the factory function for creating local estimator instances."""
         if self.local_estimator == "linear":
-            return lambda: Ridge(alpha=1e-10)
+            return lambda: Ridge(alpha=1.0)
         elif self.local_estimator == "tree":
             return lambda: _NativeXGBoostRegressor(
                 params={
