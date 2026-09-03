@@ -1,6 +1,9 @@
-import numpy as np
-from typing import NamedTuple
+from __future__ import annotations
+
 import warnings
+from typing import NamedTuple
+
+import numpy as np
 
 
 class LocalModel(NamedTuple):
@@ -51,7 +54,8 @@ def _validate_static_hyperparameters(self) -> None:
         not isinstance(self.kernel_coeff, (float, int)) or self.kernel_coeff < 0
     ):
         raise ValueError(
-            f"kernel_coeff must be a non negative float or None, got {self.kernel_coeff}"
+            "kernel_coeff must be a non negative float or None, got "
+            f"{self.kernel_coeff}"
         )
 
     if not isinstance(self.min_neighbors, int) or self.min_neighbors <= 0:
@@ -69,7 +73,8 @@ def _validate_static_hyperparameters(self) -> None:
         or self.early_stopping_tolerance < 0
     ):
         raise ValueError(
-            f"early_stopping_tolerance must be non-negative, got {self.early_stopping_tolerance}"
+            "early_stopping_tolerance must be non-negative, got "
+            f"{self.early_stopping_tolerance}"
         )
 
     if isinstance(self.local_estimator, str) and self.local_estimator not in [
@@ -77,12 +82,16 @@ def _validate_static_hyperparameters(self) -> None:
         "tree",
     ]:
         raise ValueError(
-            f"local_estimator string must be 'linear' or 'tree', got {self.local_estimator}"
+            f"local_estimator string must be 'linear' or 'tree', "
+            f"got {self.local_estimator}"
         )
 
     if not isinstance(self.random_state, (type(None), int, np.random.RandomState)):
+        # ValueError, not TypeError, to match the other validators here and
+        # scikit-learn's own check_random_state.
         raise ValueError(
-            f"random_state must be None, an integer, or a RandomState instance, got {self.random_state}"
+            "random_state must be None, an integer, or a RandomState instance, "
+            f"got {self.random_state}"
         )
 
 
@@ -107,6 +116,7 @@ def _adjust_dynamic_parameters(self, n_samples: int) -> tuple[int, int]:
             f"n_subsets ({self.n_subsets}) is larger than n_samples ({n_samples}). "
             f"Setting n_subsets to {n_samples}.",
             UserWarning,
+            stacklevel=2,
         )
         n_subsets_adjusted = n_samples
     else:
@@ -122,8 +132,10 @@ def _adjust_dynamic_parameters(self, n_samples: int) -> tuple[int, int]:
     if n_neighbors < self.min_neighbors:
         warnings.warn(
             f"Each subset will have only {n_neighbors} neighbors, which is less than "
-            f"min_neighbors ({self.min_neighbors}). Consider reducing n_subsets or increasing sample size.",
+            f"min_neighbors ({self.min_neighbors}). Consider reducing n_subsets "
+            "or increasing sample size.",
             UserWarning,
+            stacklevel=2,
         )
 
     return n_subsets_adjusted, n_neighbors

@@ -42,10 +42,13 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.8"
-dependencies = ["numpy", "scikit-learn", "xgboost"]
+dependencies = ["numpy", "scipy", "scikit-learn", "xgboost"]
 
-[project.optional-dependencies]
-extra = ["scipy"]
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RUF", "FA", "BLE"]
 
 [tool.setuptools.dynamic]
 version = {attr = "less.__version__"}

@@ -1,47 +1,273 @@
+from __future__ import annotations
+
 import warnings
-from typing import Optional, Callable, Union, Any
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from typing import Any
+
 import numpy as np
-from joblib import Parallel, delayed
-from ._utils import (
-    LocalModel,
-    _validate_static_hyperparameters,
-    _adjust_dynamic_parameters,
-)
+from joblib import effective_n_jobs
+from scipy.linalg import LinAlgError, cho_factor, cho_solve
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.model_selection import train_test_split
+from sklearn.utils import check_random_state
+from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 from threadpoolctl import threadpool_limits
-from xgboost import DMatrix, train as xgb_train
+from xgboost import DMatrix
+from xgboost import train as xgb_train
+
+from ._utils import (
+    LocalModel,
+    _adjust_dynamic_parameters,
+    _validate_static_hyperparameters,
+)
 
 INTERNAL_DTYPE = np.float32
+
+
+def _solve_ridge(X: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
+    r"""
+    Ridge coefficients for a column-centered *X* and a centered *y*.
+
+    Uses the primal normal equations when ``n_samples >= n_features`` and the
+    dual (kernel) form otherwise, which is the same choice scikit-learn's Ridge
+    makes internally. The Gram matrix is accumulated by BLAS in the input dtype
+    and promoted to float64 before the factorization, so the O(n*d^2) part stays
+    cheap while the solve keeps full precision.
+
+    Parameters
+    ----------
+    X : np.ndarray of shape (n_samples, n_features)
+        Column-centered design matrix.
+    y : np.ndarray of shape (n_samples,)
+        Centered targets.
+    alpha : float
+        Regularization strength.
+
+    Returns
+    -------
+    np.ndarray of shape (n_features,)
+        The fitted coefficients, in float64.
+    """
+    n_samples, n_features = X.shape
+
+    if n_samples >= n_features:
+        gram = np.asarray(X.T @ X, dtype=np.float64)
+        gram.flat[:: n_features + 1] += alpha
+        rhs = np.asarray(X.T @ y, dtype=np.float64)
+        try:
+            return cho_solve(
+                cho_factor(gram, lower=True, check_finite=False),
+                rhs,
+                check_finite=False,
+            )
+        except LinAlgError:
+            return np.linalg.lstsq(gram, rhs, rcond=None)[0]
+
+    # n_samples < n_features: solving the (n x n) kernel system is cheaper and,
+    # unlike the Gram matrix, it is not rank deficient.
+    kernel = np.asarray(X @ X.T, dtype=np.float64)
+    kernel.flat[:: n_samples + 1] += alpha
+    target = np.asarray(y, dtype=np.float64)
+    try:
+        dual = cho_solve(
+            cho_factor(kernel, lower=True, check_finite=False),
+            target,
+            check_finite=False,
+        )
+    except LinAlgError:
+        dual = np.linalg.lstsq(kernel, target, rcond=None)[0]
+    return X.T @ dual
+
+
+class _ClosedFormRidge:
+    """Ridge regressor solved in closed form, exposing ``coef_``/``intercept_``.
+
+    Numerically equivalent to ``Ridge(alpha=alpha)`` but skips scikit-learn's
+    input validation, re-centering and condition-number estimation, which
+    together dominate the runtime at the subset sizes LESS trains on.
+    """
+
+    __slots__ = ("alpha", "coef_", "intercept_")
+
+    def __init__(self, alpha: float = 1e-6):
+        self.alpha = alpha
+        self.coef_ = None
+        self.intercept_ = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> _ClosedFormRidge:
+        x_offset = X.mean(axis=0)
+        y_offset = float(np.mean(y, dtype=np.float64))
+        coef = _solve_ridge(X - x_offset, y - X.dtype.type(y_offset), self.alpha)
+        self.coef_ = coef
+        self.intercept_ = y_offset - float(coef @ x_offset)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.coef_ is None:
+            raise ValueError("Model is not fitted")
+        return X @ self.coef_ + self.intercept_
 
 
 class _NativeXGBoostRegressor:
     """Lightweight sklearn-compatible wrapper around xgboost.train."""
 
-    __slots__ = ("params", "num_boost_round", "_booster")
+    __slots__ = ("_booster", "num_boost_round", "params")
 
     def __init__(self, params: dict[str, Any], num_boost_round: int = 1):
         self.params = params
         self.num_boost_round = num_boost_round
         self._booster = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "_NativeXGBoostRegressor":
+    def fit(self, X: np.ndarray, y: np.ndarray) -> _NativeXGBoostRegressor:
         dtrain = DMatrix(X, label=y)
         self._booster = xgb_train(
             params=self.params,
             dtrain=dtrain,
             num_boost_round=self.num_boost_round,
         )
+        # Training runs one thread per model (models are fitted in parallel), but
+        # prediction happens serially in the caller, so give it the whole machine.
+        self._booster.set_param({"nthread": 0})
         return self
 
-    def predict(self, X: Union[np.ndarray, DMatrix]) -> np.ndarray:
+    def predict(self, X: np.ndarray | DMatrix) -> np.ndarray:
         if self._booster is None:
             raise ValueError("Model is not fitted")
+        if isinstance(X, np.ndarray) and X.flags.c_contiguous:
+            # Skips DMatrix construction entirely; bitwise-identical output.
+            return self._booster.inplace_predict(X)
         dmatrix = X if isinstance(X, DMatrix) else DMatrix(X)
         return self._booster.predict(dmatrix)
+
+
+class _NativeXGBoostForest:
+    """A random forest grown as several single-threaded boosters in parallel.
+
+    XGBoost grows the trees of a ``num_parallel_tree`` forest one after another
+    and only parallelizes *inside* a tree. On the narrow ``(n_samples,
+    n_subsets)`` matrix LESS feeds the global estimator there is too little work
+    per node for that to pay off: measured speedup stays around 1.5x no matter
+    how many cores or trees are involved.
+
+    The trees of a forest are independent, so this splits them across several
+    boosters that each run on one thread and share a single already-binned
+    ``DMatrix``, which uses the tree dimension for parallelism instead. The
+    first chunk is grown on all threads: that call is what builds the shared
+    gradient index, and its trees are kept rather than thrown away.
+
+    Predictions are the tree-count weighted mean of the chunks, which is what
+    the single-booster forest computes internally.
+    """
+
+    __slots__ = ("_boosters", "_weights", "n_jobs", "num_boost_round", "params")
+
+    # How many chunks a forest is cut into. Deliberately a constant rather than
+    # a function of n_jobs: XGBoost's output does not depend on ``nthread``, so
+    # a fixed layout keeps the fitted forest identical whatever the thread
+    # budget, and n_jobs only decides how fast the chunks are grown. Measured
+    # sweet spot on a 10-core machine; 4 chunks left ~25% on the table and 10
+    # was no better than 8.
+    _N_CHUNKS = 8
+
+    # Below this many trees the thread hand-off costs more than it saves.
+    _MIN_TREES_TO_SPLIT = 5
+
+    def __init__(
+        self,
+        params: dict[str, Any],
+        num_boost_round: int = 1,
+        n_jobs: int = -1,
+    ):
+        self.params = params
+        self.num_boost_round = num_boost_round
+        self.n_jobs = n_jobs
+        self._boosters = None
+        self._weights = None
+
+    @classmethod
+    def _chunk_sizes(cls, n_trees: int) -> list[int]:
+        """Cut *n_trees* into a one-tree warm-up chunk plus even parallel chunks.
+
+        The first chunk is grown before the others because it is the call that
+        builds the shared gradient index, so it cannot overlap with anything.
+        That makes it the serial part of the fit, and it only gets XGBoost's own
+        ~1.5x from the extra threads, so it is kept as small as possible: one
+        tree, just enough to trigger the binning.
+        """
+        if n_trees < cls._MIN_TREES_TO_SPLIT:
+            return [n_trees]
+        rest = n_trees - 1
+        n_chunks = min(cls._N_CHUNKS, rest)
+        base, extra = divmod(rest, n_chunks)
+        return [1] + [base + (1 if i < extra else 0) for i in range(n_chunks)]
+
+    def _train_chunk(
+        self, dtrain: DMatrix, n_trees: int, nthread: int, seed_offset: int
+    ) -> Any:
+        params = {
+            **self.params,
+            "num_parallel_tree": n_trees,
+            "nthread": nthread,
+            "seed": self.params.get("seed", 0) + seed_offset,
+        }
+        booster = xgb_train(
+            params=params, dtrain=dtrain, num_boost_round=self.num_boost_round
+        )
+        booster.set_param({"nthread": 0})
+        return booster
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> _NativeXGBoostForest:
+        chunks = self._chunk_sizes(int(self.params.get("num_parallel_tree", 1)))
+        dtrain = DMatrix(X, label=y)
+
+        # The first chunk runs on every thread and, as a side effect, builds the
+        # gradient index the remaining chunks then only read.
+        boosters = [self._train_chunk(dtrain, chunks[0], 0, 0)]
+        rest = list(enumerate(chunks[1:], start=1))
+
+        if rest:
+            n_workers = min(effective_n_jobs(self.n_jobs), len(rest))
+            if n_workers > 1:
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    boosters.extend(
+                        pool.map(
+                            lambda item: self._train_chunk(dtrain, item[1], 1, item[0]),
+                            rest,
+                        )
+                    )
+            else:
+                # One worker: same chunks, same trees, just grown one after the
+                # other with every thread each.
+                boosters.extend(
+                    self._train_chunk(dtrain, n_trees, 0, offset)
+                    for offset, n_trees in rest
+                )
+
+        self._boosters = boosters
+        weights = np.asarray(chunks, dtype=np.float64)
+        self._weights = weights / weights.sum()
+        return self
+
+    def predict(self, X: np.ndarray | DMatrix) -> np.ndarray:
+        if self._boosters is None:
+            raise ValueError("Model is not fitted")
+        if isinstance(X, np.ndarray) and X.flags.c_contiguous:
+            parts = (booster.inplace_predict(X) for booster in self._boosters)
+        else:
+            dmatrix = X if isinstance(X, DMatrix) else DMatrix(X)
+            parts = (booster.predict(dmatrix) for booster in self._boosters)
+
+        out = None
+        for weight, part in zip(self._weights, parts):
+            if out is None:
+                out = part * INTERNAL_DTYPE(weight)
+            else:
+                out += part * INTERNAL_DTYPE(weight)
+        return out
 
 
 class BaseLESSRegressor(BaseEstimator, RegressorMixin):
@@ -99,14 +325,14 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
     def __init__(
         self,
         n_subsets: int = 20,
-        local_estimator: Union[str, Callable[[], Any]] = "linear",
-        global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
-        cluster_method: Union[str, Callable[..., Any]] = "tree",
-        val_size: Optional[float] = None,
-        kernel_coeff: Optional[float] = 0.1,
+        local_estimator: str | Callable[[], Any] = "linear",
+        global_estimator: str | Callable[[], Any] | None = "xgboost",
+        cluster_method: str | Callable[..., Any] = "tree",
+        val_size: float | None = None,
+        kernel_coeff: float | None = 0.1,
         min_neighbors: int = 10,
         local_n_jobs: int = -1,
-        random_state: Optional[Union[int, np.random.RandomState]] = None,
+        random_state: int | np.random.RandomState | None = None,
     ):
         self.n_subsets = n_subsets
         self.local_estimator = local_estimator
@@ -124,13 +350,14 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             self._build_native_global_xgboost_rf_base_params()
         )
 
-        # Initialize random generator
-        self._rng = np.random.RandomState(self.random_state)
+        # Initialize random generator. Re-seeded at every fit, so refitting the
+        # same instance with an integer seed reproduces the same model.
+        self._rng = check_random_state(self.random_state)
 
     def _get_local_estimator_factory(self) -> Callable[[], Any]:
         """Get the factory function for creating local estimator instances."""
         if self.local_estimator == "linear":
-            return lambda: Ridge(alpha=1e-6, copy_X=False)
+            return lambda: _ClosedFormRidge(alpha=1e-6)
         elif self.local_estimator == "tree":
             return lambda: _NativeXGBoostRegressor(
                 params={
@@ -156,12 +383,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         else:
             raise ValueError(f"Invalid local_estimator: {self.local_estimator}")
 
-    def _get_global_estimator_factory(self) -> Optional[Callable[[], Any]]:
+    def _get_global_estimator_factory(self) -> Callable[[], Any] | None:
         """Get the factory function for creating the global estimator instance."""
         if self.global_estimator == "xgboost":
             base = self._native_global_xgb_rf_base_params
-            return lambda: _NativeXGBoostRegressor(
+            return lambda: _NativeXGBoostForest(
                 params={**base, "seed": self._rng.randint(2**31)},
+                n_jobs=self.local_n_jobs,
             )
         elif self.global_estimator is None:
             return None
@@ -223,7 +451,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         X: np.ndarray,
         centers: np.ndarray,
         kernel_coeff: float,
-        x_sq_norms: Optional[np.ndarray] = None,
+        x_sq_norms: np.ndarray | None = None,
     ) -> np.ndarray:
         """Compute all RBF distances in one vectorized pass (in-place)."""
         if X.shape[0] == 0 or centers.shape[0] == 0:
@@ -236,7 +464,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         center_sq_row = np.einsum("ij,ij->i", centers, centers)[np.newaxis, :]
 
         # Build squared distances in a single buffer
-        dist = np.dot(X, centers.T)          # (n_samples, n_subsets)
+        dist = np.dot(X, centers.T)  # (n_samples, n_subsets)
         dist *= -2.0
         dist += x_sq_col
         dist += center_sq_row
@@ -251,7 +479,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         X: np.ndarray,
         centers: np.ndarray,
         n_neighbors: int,
-        x_sq_norms: Optional[np.ndarray] = None,
+        x_sq_norms: np.ndarray | None = None,
     ) -> np.ndarray:
         """Find exact nearest neighbors with brute-force top-k (in-place)."""
         n_samples = X.shape[0]
@@ -271,22 +499,26 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         center_sq_norms = np.einsum("ij,ij->i", centers, centers).reshape(-1, 1)
 
         # Build squared distances in a single buffer
-        sq_dist = np.dot(centers, X.T)        # (n_subsets, n_samples)
+        sq_dist = np.dot(centers, X.T)  # (n_subsets, n_samples)
         sq_dist *= -2.0
         sq_dist += center_sq_norms
         sq_dist += x_sq_norms[np.newaxis, :]
         np.maximum(sq_dist, 0.0, out=sq_dist)
 
+        # One introselect per centre; the rows are independent, and numpy's
+        # axis=1 form runs them one after another on a single thread.
         kth = n_neighbors - 1
-        return np.argpartition(sq_dist, kth=kth, axis=1)[:, :n_neighbors]
+        rows = self._map_workers(
+            lambda row: np.argpartition(row, kth=kth)[:n_neighbors], sq_dist
+        )
+        return np.stack(rows)
 
     def _predict_local_outputs(
         self,
         X: np.ndarray,
         local_models: list[LocalModel],
-        linear_coefs: Optional[np.ndarray] = None,
-        linear_intercepts: Optional[np.ndarray] = None,
-        shared_dmatrix: Optional[DMatrix] = None,
+        linear_coefs: np.ndarray | None = None,
+        linear_intercepts: np.ndarray | None = None,
     ) -> np.ndarray:
         """Predict local model outputs, using a single matmul for linear models."""
         if not local_models:
@@ -306,7 +538,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         ):
             try:
                 coefs = np.vstack(
-                    [np.ravel(local_model.estimator.coef_) for local_model in local_models]
+                    [
+                        np.ravel(local_model.estimator.coef_)
+                        for local_model in local_models
+                    ]
                 )
                 intercepts = np.array(
                     [
@@ -318,35 +553,27 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 out = np.dot(X, coefs.T)
                 out += intercepts
                 return out.astype(INTERNAL_DTYPE, copy=False)
-            except Exception:
+            except (AttributeError, IndexError, TypeError, ValueError):
+                # Estimators whose coef_/intercept_ are not plain 1-D arrays
+                # simply fall through to the per-model prediction path below.
                 pass
 
         # Generic path: pre-allocate output, fill columns (no list+column_stack)
-        if all(
-            isinstance(local_model.estimator, _NativeXGBoostRegressor)
-            for local_model in local_models
-        ):
-            if shared_dmatrix is None:
-                shared_dmatrix = DMatrix(X)
-            predict_input = shared_dmatrix
-        else:
-            predict_input = X
-
         n_models = len(local_models)
         out = np.empty((X.shape[0], n_models), dtype=INTERNAL_DTYPE)
         for i, local_model in enumerate(local_models):
             try:
-                out[:, i] = local_model.estimator.predict(predict_input)
+                out[:, i] = local_model.estimator.predict(X)
             except Exception as e:
                 raise RuntimeError(
-                    f"Error predicting with local model {i}: {str(e)}"
+                    f"Error predicting with local model {i}: {e!s}"
                 ) from e
 
         return out
 
     def _get_linear_prediction_params(
         self, local_models: list[LocalModel]
-    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Extract coefficient caches for linear-compatible local estimators."""
         if not local_models:
             return None, None
@@ -370,7 +597,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 dtype=INTERNAL_DTYPE,
             )
             return linear_coefs, linear_intercepts
-        except Exception:
+        except (AttributeError, IndexError, TypeError, ValueError):
+            # Not linear-compatible after all; callers fall back to predict().
             return None, None
 
     def _get_cluster_centers(self, X: np.ndarray) -> np.ndarray:
@@ -409,7 +637,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             # Use sklearn clustering
             try:
                 if self.cluster_method == "kmeans":
-                    # Use a new random seed for each call to ensure diversity across iterations
+                    # New seed per call, for diversity across iterations
                     clusterer = KMeans(
                         n_clusters=self._n_subsets_adjusted,
                         random_state=self._rng.randint(2**31),
@@ -424,16 +652,57 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 clusterer.fit(X)
                 return clusterer.cluster_centers_
             except Exception as e:
-                raise RuntimeError(f"Error during clustering: {str(e)}") from e
+                raise RuntimeError(f"Error during clustering: {e!s}") from e
         else:
             raise ValueError(f"Invalid cluster_method: {self.cluster_method}")
+
+    @contextmanager
+    def _worker_pool(self) -> Iterator[None]:
+        """Hold one thread pool open for the whole fit.
+
+        Every stage dispatches the same handful of short tasks, and standing a
+        pool up per stage costs more than the tasks themselves: the per-call
+        dispatch loop was ~5% of fit time on the profiles.
+        """
+        n_workers = effective_n_jobs(self.local_n_jobs)
+        pool = ThreadPoolExecutor(max_workers=n_workers) if n_workers > 1 else None
+        self._pool = pool
+        try:
+            yield
+        finally:
+            self._pool = None
+            if pool is not None:
+                pool.shutdown(wait=True)
+
+    def _map_workers(self, fn: Callable[..., Any], items: Any) -> list[Any]:
+        """Run *fn* over *items*, on the fit-scoped pool when there is one."""
+        pool = getattr(self, "_pool", None)
+        if pool is None:
+            return [fn(item) for item in items]
+        return list(pool.map(fn, items))
+
+    def _get_x_sq_norms(self, X: np.ndarray) -> np.ndarray:
+        """Squared row norms of *X*, reused for as long as *X* is the same array.
+
+        Every stage needs these for both the neighbour search and the RBF
+        weights, and boosting hands the same feature matrix to every stage, so
+        recomputing them is a full pass over X thrown away once per stage.
+        """
+        # Identity, not equality; holding the array also keeps a freed one from
+        # being mistaken for a new one at the same address.
+        cached = getattr(self, "_x_sq_norms_cache", None)
+        if cached is not None and cached[0] is X:
+            return cached[1]
+        norms = np.einsum("ij,ij->i", X, X)
+        self._x_sq_norms_cache = (X, norms)
+        return norms
 
     def _build_local_models(
         self,
         X: np.ndarray,
         y: np.ndarray,
-        prediction_data: Optional[np.ndarray] = None,
-    ) -> tuple[list[LocalModel], np.ndarray, Optional[np.ndarray]]:
+        prediction_data: np.ndarray | None = None,
+    ) -> tuple[list[LocalModel], np.ndarray, np.ndarray | None]:
         r"""
         Build local models for one stage of the algorithm.
 
@@ -446,7 +715,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         """
         # Get cluster centers
         centers = self._get_cluster_centers(X)
-        x_sq_norms = np.einsum("ij,ij->i", X, X)
+        x_sq_norms = self._get_x_sq_norms(X)
 
         # High-dimensional data benefits more from brute-force top-k than tree search.
         neighbor_indices = self._find_neighbor_indices(
@@ -484,23 +753,29 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
             _tls = threading.local()
 
-            def _fit_with_buf(local_est, neighbors, i):
+            def _fit_with_buf(item):
+                i, local_est, neighbors = item
                 if not hasattr(_tls, "X_buf"):
-                    _tls.X_buf = np.empty(
-                        (n_neighbors, n_features), dtype=X.dtype
-                    )
+                    _tls.X_buf = np.empty((n_neighbors, n_features), dtype=X.dtype)
                     _tls.y_buf = np.empty(n_neighbors, dtype=y.dtype)
                 return self._fit_single_local_model(
-                    local_est, X, y, neighbors, i, _tls.X_buf, _tls.y_buf,
+                    local_est,
+                    X,
+                    y,
+                    neighbors,
+                    i,
+                    _tls.X_buf,
+                    _tls.y_buf,
                 )
 
-            with threadpool_limits(limits=1):
-                results = Parallel(n_jobs=self.local_n_jobs, prefer="threads")(
-                    delayed(_fit_with_buf)(local_est, neighbors, i)
-                    for i, (local_est, neighbors) in enumerate(
-                        zip(local_estimators, neighbor_indices)
-                    )
+            work = [
+                (i, local_est, neighbors)
+                for i, (local_est, neighbors) in enumerate(
+                    zip(local_estimators, neighbor_indices)
                 )
+            ]
+            with threadpool_limits(limits=1):
+                results = self._map_workers(_fit_with_buf, work)
 
         for local_model, center in results:
             local_models.append(local_model)
@@ -514,7 +789,9 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         if prediction_data is None:
             return local_models, center_matrix, None
 
-        linear_coefs, linear_intercepts = self._get_linear_prediction_params(local_models)
+        linear_coefs, linear_intercepts = self._get_linear_prediction_params(
+            local_models
+        )
         prediction_x_sq_norms = x_sq_norms if prediction_data is X else None
         Z = self._compute_weighted_features(
             prediction_data,
@@ -534,8 +811,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         y: np.ndarray,
         neighbors: np.ndarray,
         index: int,
-        X_buf: Optional[np.ndarray] = None,
-        y_buf: Optional[np.ndarray] = None,
+        X_buf: np.ndarray | None = None,
+        y_buf: np.ndarray | None = None,
     ) -> tuple[LocalModel, np.ndarray]:
         """Fit a single local estimator for a subset.
 
@@ -553,40 +830,57 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 X_local = X[neighbors]
                 y_local = y[neighbors]
             center = np.mean(X_local, axis=0)
-            if isinstance(local_estimator, (LinearRegression, Ridge)):
+            if isinstance(local_estimator, (_ClosedFormRidge, LinearRegression, Ridge)):
                 # Scale in-place to fix conditioning; un-scale coefs after fit.
-                std = np.std(X_local, axis=0)
+                X_local -= center
+                # Column standard deviations read straight off the values we
+                # just centered: one pass and no temporary, where np.std would
+                # re-derive the mean and materialise the squared deviations.
+                std = np.sqrt(
+                    np.einsum("ij,ij->j", X_local, X_local)
+                    / X_local.dtype.type(X_local.shape[0])
+                )
                 # Mask for constant / near-constant features:
                 # leave them unscaled (std=1) so coef stays 0 after fit.
                 safe = std > 1e-7
                 std[~safe] = 1.0
-                X_local -= center
                 X_local /= std
-                local_estimator.fit(
-                    np.asarray(X_local, dtype=np.float64),
-                    np.asarray(y_local, dtype=np.float64),
-                )
+                if isinstance(local_estimator, _ClosedFormRidge):
+                    # X_local is already centered, so solve on it directly and
+                    # skip the float64 copy sklearn would force.
+                    y_offset = np.mean(y_local, dtype=np.float64)
+                    coef = _solve_ridge(
+                        X_local,
+                        y_local - y_local.dtype.type(y_offset),
+                        local_estimator.alpha,
+                    )
+                    intercept = y_offset
+                else:
+                    local_estimator.fit(
+                        np.asarray(X_local, dtype=np.float64),
+                        np.asarray(y_local, dtype=np.float64),
+                    )
+                    coef = np.asarray(local_estimator.coef_).ravel()
+                    intercept = local_estimator.intercept_
                 # Un-scale only the features that were actually scaled.
-                coef = np.asarray(local_estimator.coef_).ravel()
                 coef[safe] /= std[safe]
                 coef[~safe] = 0.0
                 local_estimator.coef_ = coef
-                local_estimator.intercept_ -= coef @ center
+                local_estimator.intercept_ = intercept - coef @ center
             else:
                 local_estimator.fit(X_local, y_local)
             return LocalModel(local_estimator, center), center
         except Exception as e:
-            raise RuntimeError(f"Error training local model {index}: {str(e)}") from e
+            raise RuntimeError(f"Error training local model {index}: {e!s}") from e
 
     def _compute_weighted_features(
         self,
         X: np.ndarray,
         local_models: list[LocalModel],
-        center_matrix: Optional[np.ndarray] = None,
-        x_sq_norms: Optional[np.ndarray] = None,
-        linear_coefs: Optional[np.ndarray] = None,
-        linear_intercepts: Optional[np.ndarray] = None,
-        shared_dmatrix: Optional[DMatrix] = None,
+        center_matrix: np.ndarray | None = None,
+        x_sq_norms: np.ndarray | None = None,
+        linear_coefs: np.ndarray | None = None,
+        linear_intercepts: np.ndarray | None = None,
     ) -> np.ndarray:
         r"""
         Compute Z = distances * local_preds in one pass.
@@ -599,19 +893,21 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         np.ndarray of shape (n_samples, n_subsets)
             The weighted feature matrix Z.
         """
+        if center_matrix is None and local_models:
+            center_matrix = np.vstack(
+                [local_model.center for local_model in local_models]
+            )
+        elif center_matrix is None:
+            center_matrix = np.zeros((0, X.shape[1]), dtype=X.dtype)
+
+        kernel_coeff = self._get_kernel_coeff(len(local_models))
+
         local_preds = self._predict_local_outputs(
             X,
             local_models,
             linear_coefs=linear_coefs,
             linear_intercepts=linear_intercepts,
-            shared_dmatrix=shared_dmatrix,
         )
-        if center_matrix is None and local_models:
-            center_matrix = np.vstack([local_model.center for local_model in local_models])
-        elif center_matrix is None:
-            center_matrix = np.zeros((0, X.shape[1]), dtype=X.dtype)
-
-        kernel_coeff = self._get_kernel_coeff(len(local_models))
         distances = self._compute_distance_matrix(
             X,
             center_matrix,
@@ -660,6 +956,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             accept_sparse=False,
             dtype=INTERNAL_DTYPE,
             order="C",
+            ensure_min_samples=0,
         )
 
         # Check feature count consistency
@@ -672,7 +969,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         return X
 
     def _prepare_fit(
-        self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
+        self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
     ) -> tuple[np.ndarray, np.ndarray]:
         r"""
         Prepare for fitting by validating data and setting up estimators.
@@ -691,6 +988,10 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         tuple[np.ndarray, np.ndarray]
             A tuple containing the validated X and y.
         """
+        _validate_static_hyperparameters(self)
+        self._rng = check_random_state(self.random_state)
+        self._x_sq_norms_cache = None
+
         # Validate and prepare data
         X, y = check_X_y(
             X,
@@ -707,13 +1008,13 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             warnings.warn(
                 "sample_weight is not currently supported and will be ignored",
                 UserWarning,
+                stacklevel=2,
             )
 
         self._store_sklearn_attributes(X)
 
-        if self.val_size is not None:
-            if not (0 < self.val_size < 1):
-                raise ValueError("val_size must be a float between 0 and 1.")
+        if self.val_size is not None and not (0 < self.val_size < 1):
+            raise ValueError("val_size must be a float between 0 and 1.")
 
         # Validate and adjust parameters based on training data
         self._n_subsets_adjusted, self._n_neighbors = _adjust_dynamic_parameters(
@@ -788,15 +1089,15 @@ class LESSBRegressor(BaseLESSRegressor):
         n_subsets: int = 20,
         n_estimators: int = 100,
         learning_rate: float = 0.1,
-        local_estimator: Union[str, Callable[[], Any]] = "linear",
-        global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
-        cluster_method: Union[str, Callable[..., Any]] = "tree",
-        val_size: Optional[float] = None,
-        kernel_coeff: Optional[float] = 0.1,
+        local_estimator: str | Callable[[], Any] = "linear",
+        global_estimator: str | Callable[[], Any] | None = "xgboost",
+        cluster_method: str | Callable[..., Any] = "tree",
+        val_size: float | None = None,
+        kernel_coeff: float | None = 0.1,
         min_neighbors: int = 10,
         local_n_jobs: int = -1,
         early_stopping_tolerance: float = 1e-8,
-        random_state: Optional[Union[int, np.random.RandomState]] = None,
+        random_state: int | np.random.RandomState | None = None,
     ):
         super().__init__(
             n_subsets=n_subsets,
@@ -814,6 +1115,9 @@ class LESSBRegressor(BaseLESSRegressor):
         self.learning_rate = learning_rate
         self.early_stopping_tolerance = early_stopping_tolerance
 
+        # The base constructor ran before these existed, so re-check them here.
+        _validate_static_hyperparameters(self)
+
     def _reset_state(self) -> None:
         """Reset the internal state of the regressor for refitting."""
         self._local_models_stages = []
@@ -827,14 +1131,14 @@ class LESSBRegressor(BaseLESSRegressor):
         self,
         local_models: list[LocalModel],
         center_matrix: np.ndarray,
-        linear_coefs: Optional[np.ndarray],
-        linear_intercepts: Optional[np.ndarray],
+        linear_coefs: np.ndarray | None,
+        linear_intercepts: np.ndarray | None,
         X_train: np.ndarray,
         y_train: np.ndarray,
-        X_val: Optional[np.ndarray],
-        y_val: Optional[np.ndarray],
-        cached_train_features: Optional[np.ndarray] = None,
-    ) -> Optional[Any]:
+        X_val: np.ndarray | None,
+        y_val: np.ndarray | None,
+        cached_train_features: np.ndarray | None = None,
+    ) -> Any | None:
         r"""
         Build the global model for a single boosting stage.
 
@@ -885,7 +1189,7 @@ class LESSBRegressor(BaseLESSRegressor):
                 global_est = self._global_estimator_factory()
                 global_est.fit(Z_global, y_global)
             except Exception as e:
-                raise RuntimeError(f"Error training global model: {str(e)}") from e
+                raise RuntimeError(f"Error training global model: {e!s}") from e
 
         return global_est
 
@@ -894,11 +1198,10 @@ class LESSBRegressor(BaseLESSRegressor):
         X: np.ndarray,
         local_models: list[LocalModel],
         center_matrix: np.ndarray,
-        linear_coefs: Optional[np.ndarray],
-        linear_intercepts: Optional[np.ndarray],
-        global_model: Optional[Any],
-        x_sq_norms: Optional[np.ndarray] = None,
-        shared_dmatrix: Optional[DMatrix] = None,
+        linear_coefs: np.ndarray | None,
+        linear_intercepts: np.ndarray | None,
+        global_model: Any | None,
+        x_sq_norms: np.ndarray | None = None,
     ) -> np.ndarray:
         r"""
         Make predictions for a single boosting stage.
@@ -924,7 +1227,6 @@ class LESSBRegressor(BaseLESSRegressor):
             x_sq_norms=x_sq_norms,
             linear_coefs=linear_coefs,
             linear_intercepts=linear_intercepts,
-            shared_dmatrix=shared_dmatrix,
         )
 
         if global_model is not None:
@@ -932,8 +1234,8 @@ class LESSBRegressor(BaseLESSRegressor):
         return np.sum(Z, axis=1)
 
     def fit(
-        self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
-    ) -> "LESSBRegressor":
+        self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
+    ) -> LESSBRegressor:
         r"""
         Fit the LESSB regressor using boosting.
 
@@ -964,109 +1266,118 @@ class LESSBRegressor(BaseLESSRegressor):
             dtype=INTERNAL_DTYPE,
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
-        fit_x_sq_norms = (
-            np.einsum("ij,ij->i", X, X) if self.val_size is not None else None
-        )
+        fit_x_sq_norms = self._get_x_sq_norms(X) if self.val_size is not None else None
         residuals = np.empty_like(y)
 
-        for stage in range(self.n_estimators):
-            try:
-                np.subtract(y, current_predictions, out=residuals)
+        with self._worker_pool():
+            for stage in range(self.n_estimators):
+                try:
+                    np.subtract(y, current_predictions, out=residuals)
 
-                if self.val_size is not None:
-                    X_train, X_val, residuals_train, residuals_val = train_test_split(
-                        X, residuals, test_size=self.val_size, random_state=self._rng
-                    )
-                else:
-                    X_train, residuals_train = X, residuals
-                    X_val, residuals_val = None, None
-
-                prediction_data = X_train if self.val_size is None else None
-                local_models, center_matrix, Z_stage = self._build_local_models(
-                    X_train, residuals_train, prediction_data=prediction_data
-                )
-                linear_coefs, linear_intercepts = self._get_linear_prediction_params(
-                    local_models
-                )
-
-                if self.val_size is None:
-                    if Z_stage is None:
-                        raise RuntimeError(
-                            "Training predictions were not computed for the stage"
+                    if self.val_size is not None:
+                        X_train, X_val, residuals_train, residuals_val = (
+                            train_test_split(
+                                X,
+                                residuals,
+                                test_size=self.val_size,
+                                random_state=self._rng,
+                            )
                         )
-                    global_model = self._build_stage(
-                        local_models,
-                        center_matrix,
-                        linear_coefs,
-                        linear_intercepts,
-                        X_train,
-                        residuals_train,
-                        None,
-                        None,
-                        cached_train_features=Z_stage,
-                    )
-                    if global_model is not None:
-                        stage_predictions = global_model.predict(Z_stage)
                     else:
-                        stage_predictions = np.sum(Z_stage, axis=1)
-                else:
-                    global_model = self._build_stage(
-                        local_models,
-                        center_matrix,
-                        linear_coefs,
-                        linear_intercepts,
-                        X_train,
-                        residuals_train,
-                        X_val,
-                        residuals_val,
+                        X_train, residuals_train = X, residuals
+                        X_val, residuals_val = None, None
+
+                    prediction_data = X_train if self.val_size is None else None
+                    local_models, center_matrix, Z_stage = self._build_local_models(
+                        X_train, residuals_train, prediction_data=prediction_data
                     )
-                    stage_predictions = self._predict_stage(
-                        X,
-                        local_models,
-                        center_matrix,
-                        linear_coefs,
-                        linear_intercepts,
-                        global_model,
-                        x_sq_norms=fit_x_sq_norms,
+                    linear_coefs, linear_intercepts = (
+                        self._get_linear_prediction_params(local_models)
                     )
 
-                if not np.all(np.isfinite(stage_predictions)):
+                    if self.val_size is None:
+                        if Z_stage is None:
+                            raise RuntimeError(
+                                "Training predictions were not computed for the stage"
+                            )
+                        global_model = self._build_stage(
+                            local_models,
+                            center_matrix,
+                            linear_coefs,
+                            linear_intercepts,
+                            X_train,
+                            residuals_train,
+                            None,
+                            None,
+                            cached_train_features=Z_stage,
+                        )
+                        if global_model is not None:
+                            stage_predictions = global_model.predict(Z_stage)
+                        else:
+                            stage_predictions = np.sum(Z_stage, axis=1)
+                    else:
+                        global_model = self._build_stage(
+                            local_models,
+                            center_matrix,
+                            linear_coefs,
+                            linear_intercepts,
+                            X_train,
+                            residuals_train,
+                            X_val,
+                            residuals_val,
+                        )
+                        stage_predictions = self._predict_stage(
+                            X,
+                            local_models,
+                            center_matrix,
+                            linear_coefs,
+                            linear_intercepts,
+                            global_model,
+                            x_sq_norms=fit_x_sq_norms,
+                        )
+
+                    if not np.all(np.isfinite(stage_predictions)):
+                        warnings.warn(
+                            f"Non-finite predictions in stage {stage}, skipping",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                        continue
+
+                    # In-place: avoids a temp from learning_rate * stage_predictions
+                    stage_predictions *= learning_rate
+                    current_predictions += stage_predictions
+
+                    self._local_models_stages.append(local_models)
+                    self._local_center_matrices_stages.append(center_matrix)
+                    self._local_linear_coefs_stages.append(linear_coefs)
+                    self._local_linear_intercepts_stages.append(linear_intercepts)
+                    self._global_models_stages.append(global_model)
+
+                    # Reuse pre-allocated residuals for early stopping check
+                    np.subtract(y, current_predictions, out=residuals)
+                    mean_abs_residual = np.mean(np.abs(residuals))
+                    if mean_abs_residual < self.early_stopping_tolerance and stage > 0:
+                        break
+
+                except Exception as e:
                     warnings.warn(
-                        f"Non-finite predictions in stage {stage}, skipping",
+                        f"Error in boosting stage {stage}: {e}",
                         UserWarning,
+                        stacklevel=2,
                     )
-                    continue
-
-                # In-place accumulation: avoid temp from learning_rate * stage_predictions
-                stage_predictions *= learning_rate
-                current_predictions += stage_predictions
-
-                self._local_models_stages.append(local_models)
-                self._local_center_matrices_stages.append(center_matrix)
-                self._local_linear_coefs_stages.append(linear_coefs)
-                self._local_linear_intercepts_stages.append(linear_intercepts)
-                self._global_models_stages.append(global_model)
-
-                # Reuse pre-allocated residuals for early stopping check
-                np.subtract(y, current_predictions, out=residuals)
-                mean_abs_residual = np.mean(np.abs(residuals))
-                if mean_abs_residual < self.early_stopping_tolerance and stage > 0:
+                    if not self._local_models_stages:
+                        raise RuntimeError(
+                            "No boosting stages completed successfully"
+                        ) from e
                     break
-
-            except Exception as e:
-                warnings.warn(f"Error in boosting stage {stage}: {str(e)}", UserWarning)
-                if not self._local_models_stages:
-                    raise RuntimeError(
-                        "No boosting stages completed successfully"
-                    ) from e
-                break
 
         if not self._local_models_stages:
             raise RuntimeError("No boosting stages completed successfully")
 
         return self
 
-    def predict(self, X: np.ndarray, n_rounds: Optional[int] = None) -> np.ndarray:
+    def predict(self, X: np.ndarray, n_rounds: int | None = None) -> np.ndarray:
         r"""
         Predict using the fitted LESSB regressor.
 
@@ -1105,8 +1416,7 @@ class LESSBRegressor(BaseLESSRegressor):
             dtype=INTERNAL_DTYPE,
         )
         learning_rate = INTERNAL_DTYPE(self.learning_rate)
-        x_sq_norms = np.einsum("ij,ij->i", X, X)
-        shared_dmatrix = None
+        x_sq_norms = self._get_x_sq_norms(X)
 
         # Add predictions from specified number of stages
         for stage in range(n_rounds):
@@ -1116,11 +1426,6 @@ class LESSBRegressor(BaseLESSRegressor):
                 linear_coefs = self._local_linear_coefs_stages[stage]
                 linear_intercepts = self._local_linear_intercepts_stages[stage]
                 global_model = self._global_models_stages[stage]
-                if shared_dmatrix is None and all(
-                    isinstance(local_model.estimator, _NativeXGBoostRegressor)
-                    for local_model in local_models
-                ):
-                    shared_dmatrix = DMatrix(X)
                 stage_predictions = self._predict_stage(
                     X,
                     local_models,
@@ -1129,7 +1434,6 @@ class LESSBRegressor(BaseLESSRegressor):
                     linear_intercepts,
                     global_model,
                     x_sq_norms=x_sq_norms,
-                    shared_dmatrix=shared_dmatrix,
                 )
 
                 if np.all(np.isfinite(stage_predictions)):
@@ -1139,11 +1443,14 @@ class LESSBRegressor(BaseLESSRegressor):
                     warnings.warn(
                         f"Non-finite predictions in stage {stage}, skipping",
                         UserWarning,
+                        stacklevel=2,
                     )
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one bad stage must not kill predict
                 warnings.warn(
-                    f"Error in prediction stage {stage}: {str(e)}", UserWarning
+                    f"Error in prediction stage {stage}: {e}",
+                    UserWarning,
+                    stacklevel=2,
                 )
                 continue
 
@@ -1196,14 +1503,14 @@ class LESSARegressor(BaseLESSRegressor):
         self,
         n_subsets: int = 20,
         n_estimators: int = 100,
-        local_estimator: Union[str, Callable[[], Any]] = "linear",
-        global_estimator: Union[str, Callable[[], Any], None] = "xgboost",
-        cluster_method: Union[str, Callable[..., Any]] = "tree",
-        val_size: Optional[float] = None,
-        kernel_coeff: Optional[float] = 0.1,
+        local_estimator: str | Callable[[], Any] = "linear",
+        global_estimator: str | Callable[[], Any] | None = "xgboost",
+        cluster_method: str | Callable[..., Any] = "tree",
+        val_size: float | None = None,
+        kernel_coeff: float | None = 0.1,
         min_neighbors: int = 10,
         local_n_jobs: int = -1,
-        random_state: Optional[Union[int, np.random.RandomState]] = None,
+        random_state: int | np.random.RandomState | None = None,
     ):
         super().__init__(
             n_subsets=n_subsets,
@@ -1219,6 +1526,9 @@ class LESSARegressor(BaseLESSRegressor):
 
         self.n_estimators = n_estimators
 
+        # The base constructor ran before this existed, so re-check it here.
+        _validate_static_hyperparameters(self)
+
     def _reset_state(self) -> None:
         """Reset the internal state of the regressor for refitting."""
         self._local_models_iterations = []
@@ -1228,8 +1538,8 @@ class LESSARegressor(BaseLESSRegressor):
         self._global_models_iterations = []
 
     def fit(
-        self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None
-    ) -> "LESSARegressor":
+        self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
+    ) -> LESSARegressor:
         r"""
         Fit the LESSA regressor using model averaging.
 
@@ -1250,68 +1560,73 @@ class LESSARegressor(BaseLESSRegressor):
         self._reset_state()
         X, y = self._prepare_fit(X, y, sample_weight)
 
-        for _ in range(self.n_estimators):
-            try:
-                if self.val_size is not None:
-                    X_train, X_val, y_train, y_val = train_test_split(
-                        X, y, test_size=self.val_size, random_state=self._rng
-                    )
-                else:
-                    X_train, y_train = X, y
-                    X_val, y_val = None, None
-
-                prediction_data = (
-                    X_train
-                    if self.val_size is None and self._global_estimator_factory is not None
-                    else None
-                )
-                local_models, center_matrix, Z_train = self._build_local_models(
-                    X_train, y_train, prediction_data=prediction_data
-                )
-                linear_coefs, linear_intercepts = self._get_linear_prediction_params(
-                    local_models
-                )
-
-                global_est = None
-                if self._global_estimator_factory is not None:
-                    if X_val is not None and y_val is not None:
-                        Z_global = self._compute_weighted_features(
-                            X_val,
-                            local_models,
-                            center_matrix=center_matrix,
-                            linear_coefs=linear_coefs,
-                            linear_intercepts=linear_intercepts,
+        with self._worker_pool():
+            for _ in range(self.n_estimators):
+                try:
+                    if self.val_size is not None:
+                        X_train, X_val, y_train, y_val = train_test_split(
+                            X, y, test_size=self.val_size, random_state=self._rng
                         )
-                        y_global = y_val
                     else:
-                        if Z_train is None:
-                            raise RuntimeError(
-                                "Training predictions were not computed for the global estimator"
+                        X_train, y_train = X, y
+                        X_val, y_val = None, None
+
+                    prediction_data = (
+                        X_train
+                        if self.val_size is None
+                        and self._global_estimator_factory is not None
+                        else None
+                    )
+                    local_models, center_matrix, Z_train = self._build_local_models(
+                        X_train, y_train, prediction_data=prediction_data
+                    )
+                    linear_coefs, linear_intercepts = (
+                        self._get_linear_prediction_params(local_models)
+                    )
+
+                    global_est = None
+                    if self._global_estimator_factory is not None:
+                        if X_val is not None and y_val is not None:
+                            Z_global = self._compute_weighted_features(
+                                X_val,
+                                local_models,
+                                center_matrix=center_matrix,
+                                linear_coefs=linear_coefs,
+                                linear_intercepts=linear_intercepts,
                             )
-                        Z_global = Z_train
-                        y_global = y_train
+                            y_global = y_val
+                        else:
+                            if Z_train is None:
+                                raise RuntimeError(
+                                    "Training predictions were not computed for "
+                                    "the global estimator"
+                                )
+                            Z_global = Z_train
+                            y_global = y_train
 
-                    global_est = self._global_estimator_factory()
-                    global_est.fit(Z_global, y_global)
+                        global_est = self._global_estimator_factory()
+                        global_est.fit(Z_global, y_global)
 
-                self._local_models_iterations.append(local_models)
-                self._local_center_matrices_iterations.append(center_matrix)
-                self._local_linear_coefs_iterations.append(linear_coefs)
-                self._local_linear_intercepts_iterations.append(linear_intercepts)
-                self._global_models_iterations.append(global_est)
+                    self._local_models_iterations.append(local_models)
+                    self._local_center_matrices_iterations.append(center_matrix)
+                    self._local_linear_coefs_iterations.append(linear_coefs)
+                    self._local_linear_intercepts_iterations.append(linear_intercepts)
+                    self._global_models_iterations.append(global_est)
 
-            except Exception as e:
-                warnings.warn(f"Error in iteration: {str(e)}", UserWarning)
-                if not self._local_models_iterations:
-                    raise RuntimeError("No iterations completed successfully") from e
-                continue
+                except Exception as e:
+                    warnings.warn(f"Error in iteration: {e}", UserWarning, stacklevel=2)
+                    if not self._local_models_iterations:
+                        raise RuntimeError(
+                            "No iterations completed successfully"
+                        ) from e
+                    continue
 
         if not self._local_models_iterations:
             raise RuntimeError("No iterations completed successfully")
 
         return self
 
-    def predict(self, X: np.ndarray, n_estimators: Optional[int] = None) -> np.ndarray:
+    def predict(self, X: np.ndarray, n_estimators: int | None = None) -> np.ndarray:
         r"""
         Predict using the fitted LESSA regressor.
 
@@ -1349,8 +1664,7 @@ class LESSARegressor(BaseLESSRegressor):
 
         prediction_sum = np.zeros(n_samples, dtype=INTERNAL_DTYPE)
         valid_prediction_count = 0
-        x_sq_norms = np.einsum("ij,ij->i", X, X)
-        shared_dmatrix = None
+        x_sq_norms = self._get_x_sq_norms(X)
 
         for iteration in range(n_estimators):
             try:
@@ -1359,11 +1673,6 @@ class LESSARegressor(BaseLESSRegressor):
                 linear_coefs = self._local_linear_coefs_iterations[iteration]
                 linear_intercepts = self._local_linear_intercepts_iterations[iteration]
                 global_model = self._global_models_iterations[iteration]
-                if shared_dmatrix is None and all(
-                    isinstance(local_model.estimator, _NativeXGBoostRegressor)
-                    for local_model in local_models
-                ):
-                    shared_dmatrix = DMatrix(X)
 
                 Z = self._compute_weighted_features(
                     X,
@@ -1372,7 +1681,6 @@ class LESSARegressor(BaseLESSRegressor):
                     x_sq_norms=x_sq_norms,
                     linear_coefs=linear_coefs,
                     linear_intercepts=linear_intercepts,
-                    shared_dmatrix=shared_dmatrix,
                 )
 
                 if global_model is not None:
@@ -1388,11 +1696,14 @@ class LESSARegressor(BaseLESSRegressor):
                     warnings.warn(
                         f"Non-finite predictions in iteration {iteration}, skipping",
                         UserWarning,
+                        stacklevel=2,
                     )
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one bad round must not kill predict
                 warnings.warn(
-                    f"Error in prediction iteration {iteration}: {str(e)}", UserWarning
+                    f"Error in prediction iteration {iteration}: {e}",
+                    UserWarning,
+                    stacklevel=2,
                 )
                 continue
 
