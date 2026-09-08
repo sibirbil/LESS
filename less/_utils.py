@@ -86,6 +86,17 @@ def _validate_static_hyperparameters(self) -> None:
             f"got {self.local_estimator}"
         )
 
+    if isinstance(self.cluster_method, str):
+        if self.cluster_method not in ["tree", "kmeans", "spectral"]:
+            raise ValueError(
+                "cluster_method string must be 'tree', 'kmeans' or 'spectral', "
+                f"got {self.cluster_method}"
+            )
+    elif not callable(self.cluster_method):
+        raise ValueError(
+            f"cluster_method must be a string or a callable, got {self.cluster_method}"
+        )
+
     if not isinstance(self.random_state, (type(None), int, np.random.RandomState)):
         # ValueError, not TypeError, to match the other validators here and
         # scikit-learn's own check_random_state.

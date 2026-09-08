@@ -258,18 +258,19 @@ Output:
 Clustering Method (``cluster_method``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This parameter controls how the centers of the subsets are selected.
+This parameter controls how the subsets themselves are formed.
 
-*   **Default:** ``'tree'`` (Random sampling). It selects ``n_subsets`` centers randomly from the data.
+*   **Default:** ``'tree'`` (Random anchors). It draws ``n_subsets`` anchor points at random and gives each anchor its ``n_neighbors`` nearest samples, so the subsets are equally sized and may overlap.
 *   **Options:**
 
-    *   ``'tree'``: Random sampling.
-    *   ``'kmeans'``: Uses K-Means clustering. **Crucially, the number of clusters is set equal to** ``n_subsets``. The cluster centers found by K-Means become the centers of the subsets.
+    *   ``'tree'``: Random anchors with their nearest neighbors.
+    *   ``'kmeans'`` / ``'spectral'``: The data is *partitioned* and each cluster **is** a subset, as in the manuscript. The subsets therefore have varying sizes, are mutually exclusive, and cover every sample; the center of each subset is its own centroid. **The number of clusters is set equal to** ``n_subsets``, and ``min_neighbors`` does not apply.
+    *   A callable taking an ``n_clusters`` keyword and exposing ``labels_`` after ``fit`` can be passed for custom clustering.
 
 .. code-block:: python
 
     # Using K-Means for clustering
-    # Here, n_subsets=20 means K-Means will find 20 cluster centers
+    # Here, n_subsets=20 means K-Means will partition the data into 20 subsets
     less_kmeans = LESSARegressor(cluster_method='kmeans', n_subsets=20, random_state=42)
     less_kmeans.fit(X_train, y_train)
     print(f'Cluster=KMeans MSE: {mean_squared_error(y_test, less_kmeans.predict(X_test)):.4f}')

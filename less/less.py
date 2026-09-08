@@ -292,9 +292,15 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         None (for simple averaging), or a callable that returns a scikit-learn
         compatible regressor.
     cluster_method : str or callable, default='tree'
-        The method for selecting subset centers. 'tree' uses random sampling,
-        while 'kmeans' and 'spectral' use clustering. A callable can be
-        provided for custom clustering.
+        How the subsets are formed. 'tree' draws `n_subsets` random anchor
+        points and gives each one its `n_neighbors` nearest samples, so the
+        subsets are equally sized and may overlap. 'kmeans' and 'spectral'
+        instead partition the data and use the clusters themselves as the
+        subsets, which therefore vary in size, are mutually exclusive, and
+        cover every sample; `n_subsets` is then the requested number of
+        clusters and `min_neighbors` does not apply. A callable taking an
+        `n_clusters` keyword and exposing `labels_` after `fit` can be given
+        for custom clustering.
     val_size : float, optional
         The proportion of the dataset to reserve for training the global
         estimator. If specified, the data is split into a local learning set
@@ -608,19 +614,19 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             # Not linear-compatible after all; callers fall back to predict().
             return None, None
 
-    def _get_cluster_centers(self, X: np.ndarray) -> np.ndarray:
+    def _fit_cluster_labels(self, X: np.ndarray) -> np.ndarray:
         r"""
-        Select subset centers using the specified clustering method.
+        Cluster *X* with the configured clustering method and return its labels.
 
         Parameters
         ----------
         X : np.ndarray
-            The input data from which to select centers.
+            The input data to cluster.
 
         Returns
         -------
-        np.ndarray
-            The coordinates of the selected subset centers.
+        np.ndarray of shape (n_samples,)
+            The cluster label of every sample.
 
         Raises
         ------
@@ -629,39 +635,96 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         RuntimeError
             If the clustering process fails.
         """
-        if self.cluster_method == "tree":
-            # Randomly select subset centers
-            center_indices = self._rng.choice(
-                X.shape[0], size=self._n_subsets_adjusted, replace=False
-            )
-            return X[center_indices]
-        elif callable(self.cluster_method):
+        if callable(self.cluster_method):
             # Use custom clustering method
             clusterer = self.cluster_method(n_clusters=self._n_subsets_adjusted)
-            clusterer.fit(X)
-            return clusterer.cluster_centers_
-        elif isinstance(self.cluster_method, str):
-            # Use sklearn clustering
-            try:
-                if self.cluster_method == "kmeans":
-                    # New seed per call, for diversity across iterations
-                    clusterer = KMeans(
-                        n_clusters=self._n_subsets_adjusted,
-                        random_state=self._rng.randint(2**31),
-                    )
-                elif self.cluster_method == "spectral":
-                    clusterer = SpectralClustering(
-                        n_clusters=self._n_subsets_adjusted, random_state=self._rng
-                    )
-                else:
-                    raise ValueError(f"Invalid cluster_method: {self.cluster_method}")
-
-                clusterer.fit(X)
-                return clusterer.cluster_centers_
-            except Exception as e:
-                raise RuntimeError(f"Error during clustering: {e!s}") from e
+        elif self.cluster_method == "kmeans":
+            # New seed per call, for diversity across iterations
+            clusterer = KMeans(
+                n_clusters=self._n_subsets_adjusted,
+                random_state=self._rng.randint(2**31),
+            )
+        elif self.cluster_method == "spectral":
+            clusterer = SpectralClustering(
+                n_clusters=self._n_subsets_adjusted,
+                random_state=self._rng.randint(2**31),
+            )
         else:
             raise ValueError(f"Invalid cluster_method: {self.cluster_method}")
+
+        try:
+            clusterer.fit(X)
+            # Only the labels are needed: each cluster *is* a subset, and its
+            # center is the centroid of its own members. Requiring
+            # 'cluster_centers_' instead would rule out every clusterer that
+            # does not expose it, SpectralClustering among them.
+            labels = np.asarray(clusterer.labels_)
+        except Exception as e:
+            raise RuntimeError(f"Error during clustering: {e!s}") from e
+
+        if labels.ndim != 1 or labels.shape[0] != X.shape[0]:
+            raise RuntimeError(
+                f"Clustering returned labels of shape {labels.shape} for "
+                f"{X.shape[0]} samples"
+            )
+
+        return labels
+
+    @staticmethod
+    def _subsets_from_labels(labels: np.ndarray) -> list[np.ndarray]:
+        """Group sample indices by cluster label, one index array per cluster.
+
+        Sorting once and cutting at the label boundaries touches the labels
+        twice in total, where a boolean mask per label would walk the whole
+        array once for every cluster.
+        """
+        order = np.argsort(labels, kind="stable").astype(np.intp, copy=False)
+        boundaries = np.flatnonzero(np.diff(labels[order])) + 1
+        return [subset for subset in np.split(order, boundaries) if subset.size > 0]
+
+    def _get_subset_indices(
+        self, X: np.ndarray, x_sq_norms: np.ndarray | None = None
+    ) -> np.ndarray | list[np.ndarray]:
+        r"""
+        Build the sample subsets for one stage.
+
+        With ``cluster_method='tree'`` the subsets are the anchor
+        neighborhoods of the manuscript: `n_subsets` input points are drawn at
+        random, and each anchor takes its `n_neighbors` nearest samples. Those
+        subsets are equally sized and may overlap.
+
+        A clustering method instead *partitions* the data: the clusters
+        themselves are the subsets, so they vary in size, are mutually
+        exclusive, and together cover every sample.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            The input data the subsets are drawn from.
+        x_sq_norms : np.ndarray, optional
+            Precomputed squared row norms of *X*, for the anchor search.
+
+        Returns
+        -------
+        np.ndarray of shape (n_subsets, n_neighbors) or list[np.ndarray]
+            Sample indices per subset: a 2-D array when every subset has the
+            same size (the anchor case), a list of index arrays otherwise.
+        """
+        if self.cluster_method == "tree":
+            # Randomly select subset anchors
+            anchor_indices = self._rng.choice(
+                X.shape[0], size=self._n_subsets_adjusted, replace=False
+            )
+            # High-dimensional data benefits more from brute-force top-k than
+            # tree search.
+            return self._find_neighbor_indices(
+                X,
+                X[anchor_indices],
+                self._n_neighbors,
+                x_sq_norms=x_sq_norms,
+            )
+
+        return self._subsets_from_labels(self._fit_cluster_labels(X))
 
     @contextmanager
     def _worker_pool(self) -> Iterator[None]:
@@ -720,39 +783,40 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             - The center matrix of local models.
             - The weighted feature matrix Z (if *prediction_data* is given).
         """
-        # Get cluster centers
-        centers = self._get_cluster_centers(X)
         x_sq_norms = self._get_x_sq_norms(X)
-
-        # High-dimensional data benefits more from brute-force top-k than tree search.
-        neighbor_indices = self._find_neighbor_indices(
-            X,
-            centers,
-            self._n_neighbors,
-            x_sq_norms=x_sq_norms,
-        )
+        subset_indices = self._get_subset_indices(X, x_sq_norms=x_sq_norms)
 
         local_models = []
         local_centers = []
 
         local_estimators = [
-            self._local_estimator_factory() for _ in range(len(neighbor_indices))
+            self._local_estimator_factory() for _ in range(len(subset_indices))
         ]
 
-        n_neighbors = neighbor_indices.shape[1] if neighbor_indices.ndim == 2 else 0
+        # Clustering partitions the data into subsets of differing size, so the
+        # shared scratch buffers only apply to equally sized anchor subsets.
+        uniform_subsets = (
+            isinstance(subset_indices, np.ndarray) and subset_indices.ndim == 2
+        )
+        n_neighbors = subset_indices.shape[1] if uniform_subsets else 0
         n_features = X.shape[1]
+        use_buffers = uniform_subsets and n_neighbors > 0
 
         # Train local models
-        if self.local_n_jobs == 1 or len(neighbor_indices) <= 1:
+        if self.local_n_jobs == 1 or len(subset_indices) <= 1:
             # Single scratch buffer reused across all subsets
-            X_buf = np.empty((n_neighbors, n_features), dtype=X.dtype)
-            y_buf = np.empty(n_neighbors, dtype=y.dtype)
+            X_buf = (
+                np.empty((n_neighbors, n_features), dtype=X.dtype)
+                if use_buffers
+                else None
+            )
+            y_buf = np.empty(n_neighbors, dtype=y.dtype) if use_buffers else None
             results = [
                 self._fit_single_local_model(
                     local_est, X, y, neighbors, i, X_buf, y_buf
                 )
                 for i, (local_est, neighbors) in enumerate(
-                    zip(local_estimators, neighbor_indices)
+                    zip(local_estimators, subset_indices)
                 )
             ]
         else:
@@ -762,6 +826,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
             def _fit_with_buf(item):
                 i, local_est, neighbors = item
+                if not use_buffers:
+                    return self._fit_single_local_model(local_est, X, y, neighbors, i)
                 if not hasattr(_tls, "X_buf"):
                     _tls.X_buf = np.empty((n_neighbors, n_features), dtype=X.dtype)
                     _tls.y_buf = np.empty(n_neighbors, dtype=y.dtype)
@@ -778,7 +844,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             work = [
                 (i, local_est, neighbors)
                 for i, (local_est, neighbors) in enumerate(
-                    zip(local_estimators, neighbor_indices)
+                    zip(local_estimators, subset_indices)
                 )
             ]
             with threadpool_limits(limits=1):
@@ -1065,7 +1131,9 @@ class LESSBRegressor(BaseLESSRegressor):
         The global meta-estimator for combining local model predictions.
         The built-in 'xgboost' option uses a native XGBoost random forest.
     cluster_method : str or callable, default='tree'
-        The method for selecting subset centers.
+        How the subsets are formed: 'tree' uses random anchors with their
+        nearest neighbors, while clustering methods use the clusters
+        themselves as the subsets.
     val_size : float, optional
         The proportion of the dataset to reserve for the global estimator.
     kernel_coeff : float or None, default=0.1
@@ -1484,7 +1552,9 @@ class LESSARegressor(BaseLESSRegressor):
         The global meta-estimator for combining local model predictions.
         The built-in 'xgboost' option uses a native XGBoost random forest.
     cluster_method : str or callable, default='tree'
-        The method for selecting subset centers.
+        How the subsets are formed: 'tree' uses random anchors with their
+        nearest neighbors, while clustering methods use the clusters
+        themselves as the subsets.
     val_size : float, optional
         The proportion of the dataset to reserve for the global estimator.
     kernel_coeff : float or None, default=0.1
