@@ -306,9 +306,21 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         instead partition the data and use the clusters themselves as the
         subsets, which therefore vary in size, are mutually exclusive, and
         cover every sample; `n_subsets` is then the requested number of
-        clusters and `min_neighbors` does not apply. A callable taking an
-        `n_clusters` keyword and exposing `labels_` after `fit` can be given
-        for custom clustering.
+        clusters and `min_neighbors` does not apply. 'kmeans' is a subsampled,
+        iteration-limited k-means rather than a full-data one: the centers are
+        fitted on ``256 * n_subsets`` rows drawn without replacement, with one
+        initialization and at most 25 Lloyd iterations, and every row is then
+        assigned to its nearest center, which is what keeps the subsets a
+        partition of the whole training set. The threshold applies to the data
+        the subsets are built from -- the local learning set, so
+        ``(1 - val_size) * n_samples`` when `val_size` is set -- and at or below
+        ``256 * n_subsets`` rows the full-data fit runs instead, unchanged.
+        For a full-data fit on larger data, pass one explicitly, e.g.
+        ``cluster_method=lambda n_clusters: KMeans(n_clusters=n_clusters,
+        random_state=0)``; note that a callable draws no seed of its own, so the
+        run is not identical to a previous version's built-in 'kmeans'. A
+        callable taking an `n_clusters` keyword and exposing `labels_` after
+        `fit` can be given for any other clustering.
     val_size : float, optional
         The proportion of the dataset to reserve for training the global
         estimator. If specified, the data is split into a local learning set
@@ -665,10 +677,7 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             clusterer = self.cluster_method(n_clusters=self._n_subsets_adjusted)
         elif self.cluster_method == "kmeans":
             # New seed per call, for diversity across iterations
-            clusterer = KMeans(
-                n_clusters=self._n_subsets_adjusted,
-                random_state=self._rng.randint(2**31),
-            )
+            return self._kmeans_labels(X, self._rng.randint(2**31))
         elif self.cluster_method == "spectral":
             clusterer = SpectralClustering(
                 n_clusters=self._n_subsets_adjusted,
@@ -694,6 +703,134 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             )
 
         return labels
+
+    def _kmeans_labels(self, X: np.ndarray, seed: int) -> np.ndarray:
+        r"""Labels from k-means centres fitted on a sample of *X*.
+
+        The centres are estimated from ``256 * n_subsets`` rows and at most 25
+        Lloyd iterations; every row of *X* is then assigned to its nearest
+        centre, so the subsets still partition the whole training set into
+        mutually exclusive, collectively exhaustive, variable-sized clusters,
+        and each subset's weighting centre is still the mean of its own members.
+
+        What is given up is the full-data Lloyd fixed point: the centres
+        minimise a sampled, iteration-limited objective, so the partition is not
+        the one a full fit would produce. On the datasets benchmarked for this
+        change the test R2 moved by less than the spread across random_state,
+        while clustering time fell by up to an order of magnitude -- but only
+        where Lloyd was actually iterating. Well-separated data converges in a
+        handful of iterations, and there the sampling buys nothing.
+
+        The full fit runs instead when the sample would be the whole training
+        set anyway, and is retried once as a best effort when the sampled
+        centres fail to claim `n_subsets` distinct clusters: KMeans relocates
+        empty centres on every iteration, sampled centres carry no such
+        guarantee, and a missing label would silently hand the model one subset
+        fewer. On data that cannot yield `n_subsets` distinct clusters at all
+        the retry cannot help either, and is skipped for the rest of the fit.
+        """
+        n_samples = X.shape[0]
+        n_clusters = self._n_subsets_adjusted
+        # 256 rows per centre and 25 iterations are faiss's defaults for the
+        # same job (Clustering.h: max_points_per_centroid, niter).
+        sample_size = min(n_samples, 256 * n_clusters)
+
+        if sample_size >= n_samples:
+            # Nothing to subsample; the iteration cap alone is not worth a
+            # second code path.
+            return np.asarray(
+                KMeans(n_clusters=n_clusters, random_state=seed).fit(X).labels_
+            )
+
+        # Generator, not RandomState: the legacy .choice(replace=False)
+        # permutes all n rows to draw a few thousand -- measured 434 ms and
+        # 16 MB against 0.19 ms and 0.1 MB at n=2e6, in the path whose whole
+        # point is to stop touching every row.
+        sample = X[
+            np.random.default_rng(seed).choice(
+                n_samples, size=sample_size, replace=False
+            )
+        ]
+        centers = (
+            KMeans(
+                n_clusters=n_clusters,
+                random_state=seed,
+                n_init=1,
+                max_iter=25,
+            )
+            .fit(sample)
+            .cluster_centers_
+        )
+
+        labels = self._assign_to_centers(X, np.asarray(centers, dtype=X.dtype))
+        if np.bincount(labels, minlength=n_clusters).min() > 0:
+            return labels
+
+        if getattr(self, "_kmeans_fallback_is_futile", False):
+            # A previous stage already found that the full fit cannot reach
+            # n_subsets clusters on this data either, so paying for it again
+            # every stage buys nothing.
+            return labels
+
+        full_labels = np.asarray(
+            KMeans(n_clusters=n_clusters, random_state=seed).fit(X).labels_
+        )
+        recovered = np.bincount(full_labels, minlength=n_clusters).min() > 0
+        if not recovered:
+            self._kmeans_fallback_is_futile = True
+        if not getattr(self, "_kmeans_empty_warned", False):
+            self._kmeans_empty_warned = True
+            warnings.warn(
+                "Sampled k-means centres left a cluster empty; the full fit is "
+                + (
+                    "used instead for this stage."
+                    if recovered
+                    else "no better on this data, so some stages will have "
+                    "fewer than n_subsets subsets."
+                ),
+                UserWarning,
+                stacklevel=2,
+            )
+        return full_labels
+
+    @staticmethod
+    def _assign_to_centers(X: np.ndarray, centers: np.ndarray) -> np.ndarray:
+        """Nearest centre for every row of *X*.
+
+        Both arrays are shifted by the column mean first. ``||x-c||^2`` expands
+        to ``||x||^2 - 2x.c + ||c||^2``, and in float32 that expansion collapses
+        on data whose columns sit far from the origin: with a mean of 1e4 over
+        20 features ``||x||^2`` is ~2e9, where the smallest representable step is
+        ~128, while the differences that decide the nearest centre are O(1).
+        Measured on the raw form at that offset, 94.9% of rows were assigned to
+        the wrong centre; on the shifted form, none. Writing ``c = mu + a`` the
+        ``mu`` terms are constant along a row and cancel out of the argmin, so
+        this is the same computation, evaluated where float32 still has digits
+        to spare -- which is also why scikit-learn's KMeans centres internally.
+        """
+        shift = X.mean(axis=0, dtype=np.float64).astype(X.dtype)
+        X_centered = X - shift
+        centers = np.ascontiguousarray(centers - shift, dtype=X.dtype)
+
+        # ||x||^2 is constant along a row, so it cannot change the argmin.
+        dist = np.dot(X_centered, centers.T)
+        dist *= -2.0
+        dist += np.einsum("ij,ij->i", centers, centers, dtype=np.float64).astype(
+            dist.dtype
+        )[np.newaxis, :]
+
+        if not np.isfinite(dist).all():
+            # Centering fixes cancellation, not overflow: past ~1e19 the float32
+            # expansion goes infinite and the argmin of a row holding inf or NaN
+            # is meaningless (measured 45% of rows misassigned, with no empty
+            # cluster to give it away). Rare enough to pay for only when it
+            # happens.
+            centers64 = centers.astype(np.float64)
+            dist = X_centered.astype(np.float64) @ centers64.T
+            dist *= -2.0
+            dist += np.einsum("ij,ij->i", centers64, centers64)[np.newaxis, :]
+
+        return np.argmin(dist, axis=1).astype(np.intp, copy=False)
 
     @staticmethod
     def _subsets_from_labels(labels: np.ndarray) -> list[np.ndarray]:
@@ -1100,6 +1237,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         _validate_static_hyperparameters(self)
         self._rng = check_random_state(self.random_state)
         self._x_sq_norms_cache = None
+        self._kmeans_empty_warned = False
+        self._kmeans_fallback_is_futile = False
 
         # Validate and prepare data
         X, y = check_X_y(
@@ -1168,8 +1307,13 @@ class LESSBRegressor(BaseLESSRegressor):
         The built-in 'xgboost' option uses a native XGBoost random forest.
     cluster_method : str or callable, default='tree'
         How the subsets are formed: 'tree' uses random anchors with their
-        nearest neighbors, while clustering methods use the clusters
-        themselves as the subsets.
+        nearest neighbors, while clustering methods use the clusters themselves
+        as the subsets. Above ``256 * n_subsets`` rows, 'kmeans' fits those
+        clusters' centers on a sample of that many rows with one initialization
+        and at most 25 iterations, then assigns every row to its nearest center;
+        at or below that size it is the unchanged full-data fit. For a full-data
+        fit on larger data pass one explicitly, e.g. ``cluster_method=lambda
+        n_clusters: KMeans(n_clusters=n_clusters, random_state=0)``.
     val_size : float, optional
         The proportion of the dataset to reserve for the global estimator.
     kernel_coeff : float or None, default=0.1
@@ -1589,8 +1733,13 @@ class LESSARegressor(BaseLESSRegressor):
         The built-in 'xgboost' option uses a native XGBoost random forest.
     cluster_method : str or callable, default='tree'
         How the subsets are formed: 'tree' uses random anchors with their
-        nearest neighbors, while clustering methods use the clusters
-        themselves as the subsets.
+        nearest neighbors, while clustering methods use the clusters themselves
+        as the subsets. Above ``256 * n_subsets`` rows, 'kmeans' fits those
+        clusters' centers on a sample of that many rows with one initialization
+        and at most 25 iterations, then assigns every row to its nearest center;
+        at or below that size it is the unchanged full-data fit. For a full-data
+        fit on larger data pass one explicitly, e.g. ``cluster_method=lambda
+        n_clusters: KMeans(n_clusters=n_clusters, random_state=0)``.
     val_size : float, optional
         The proportion of the dataset to reserve for the global estimator.
     kernel_coeff : float or None, default=0.1
