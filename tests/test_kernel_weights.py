@@ -60,3 +60,28 @@ def test_far_test_points_predict_finite(cls):
     model = cls(n_subsets=5, kernel_coeff=1.0, n_estimators=5, random_state=0).fit(X, y)
     pred = model.predict(X * 50)
     assert np.all(np.isfinite(pred))
+
+
+@pytest.mark.parametrize("cls", [LESSARegressor, LESSBRegressor])
+@pytest.mark.parametrize("local_estimator", ["linear", "tree"])
+def test_column_offset_does_not_change_the_model(cls, local_estimator):
+    # Shifting every column by a constant moves no point relative to another,
+    # so neighbours, weights and predictions must stay the same. Uncentered,
+    # float32 distances at an offset of 1e4 picked the wrong neighbours.
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(600, 5))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] * X[:, 2]
+    X_test = rng.normal(size=(200, 5))
+    y_test = np.sin(2 * X_test[:, 0]) + X_test[:, 1] * X_test[:, 2]
+    kwargs = {
+        "n_subsets": 10,
+        "n_estimators": 5,
+        "local_estimator": local_estimator,
+        "kernel_coeff": 1.0,
+        "random_state": 0,
+    }
+    base = cls(**kwargs).fit(X, y).predict(X_test)
+    shifted = cls(**kwargs).fit(X + 1e4, y).predict(X_test + 1e4)
+    mse_base = np.mean((base - y_test) ** 2)
+    mse_shifted = np.mean((shifted - y_test) ** 2)
+    assert mse_shifted == pytest.approx(mse_base, rel=0.05)

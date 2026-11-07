@@ -1213,7 +1213,8 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
                 f"is expecting {self.n_features_in_} features as seen in fit."
             )
 
-        return X
+        shift = getattr(self, "_x_shift", None)
+        return X if shift is None else X - shift
 
     def _prepare_fit(
         self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
@@ -1252,6 +1253,16 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
             order="C",
         )
         y = np.asarray(y, dtype=INTERNAL_DTYPE)
+
+        # Every distance below is evaluated as ||x||^2 - 2 x.c + ||c||^2 in
+        # float32, which loses the digits that separate nearby points once the
+        # columns sit far from the origin: with a column mean of 1e3 and unit
+        # spread, a third of the neighbour sets came out wrong. Distances,
+        # ridge fits with an intercept and tree splits are all unchanged by a
+        # shift, so the model is fitted on the training-centered features and
+        # predict applies the same shift.
+        self._x_shift = X.mean(axis=0, dtype=np.float64).astype(INTERNAL_DTYPE)
+        X = X - self._x_shift
 
         if sample_weight is not None:
             warnings.warn(
