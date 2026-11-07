@@ -442,13 +442,14 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
 
     def _safe_normalize_distances(self, distances: np.ndarray) -> np.ndarray:
         r"""
-        Safely normalize distance weights in-place to avoid extra allocations.
+        Normalize kernel weights in-place so that each row sums to 1.
 
         Parameters
         ----------
         distances : np.ndarray of shape (n_samples, n_subsets)
-            The raw distance weights calculated from the RBF kernel.
-            **Modified in-place** and returned.
+            Kernel weights shifted so that the largest entry of every row is
+            exactly 1 (see `_compute_distance_matrix`), which keeps every row
+            sum at least 1. **Modified in-place** and returned.
 
         Returns
         -------
@@ -462,12 +463,6 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         # here: BLAS runs at memory bandwidth, numpy's reduction does not.
         ones = np.ones(distances.shape[1], dtype=distances.dtype)
         distance_sums = np.dot(distances, ones).reshape(-1, 1)
-
-        zero_mask = distance_sums.flatten() < 1e-12
-        if np.any(zero_mask):
-            uniform_weight = 1.0 / distances.shape[1]
-            distances[zero_mask] = uniform_weight
-            distance_sums[zero_mask] = 1.0
 
         np.divide(distances, distance_sums, out=distances)
         return distances
@@ -506,6 +501,12 @@ class BaseLESSRegressor(BaseEstimator, RegressorMixin):
         # which numpy does not vectorize here.
         np.abs(dist, out=dist)
         np.sqrt(dist, out=dist)
+        # Subtracting each row's smallest distance leaves the normalized
+        # weights exp(-k d_j) / sum_l exp(-k d_l) unchanged but makes the
+        # nearest center's term exactly 1. Without the shift, a point far from
+        # every center has all terms underflow, and its weights cannot be
+        # recovered from what is left.
+        dist -= dist.min(axis=1, keepdims=True)
         dist *= -kernel_coeff
         np.exp(dist, out=dist)
         return self._safe_normalize_distances(dist)
