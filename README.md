@@ -45,6 +45,9 @@ print(f"Test MSE of LESS: {mse:.2f}")
 > It is therefore *highly recommended* to scale or normalize input features prior to model training to ensure optimal performance.
 
 
+## Reproducing the Results
+The experiments of the manuscript, with their logs, figures and the scripts that produce them, are in the [LESSResults](https://github.com/sibirbil/LESSResults) repository. The results were obtained with `less-learn` 0.5.0.
+
 ## Citation
 Our software can be cited as:
 ````
